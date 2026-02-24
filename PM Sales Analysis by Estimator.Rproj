@@ -1,0 +1,16 @@
+Version: 1.0
+ProjectId: 8a78cd92-6416-4058-b778-a84718581ebb
+
+RestoreWorkspace: Default
+SaveWorkspace: Default
+AlwaysSaveHistory: Default
+
+EnableCodeIndexing: Yes
+UseSpacesForTab: Yes
+NumSpacesForTab: 2
+Encoding: UTF-8
+
+RnwWeave: Sweave
+LaTeX: pdfLaTeX
+
+ProjectName: PM Sales Analysis by Estimator
