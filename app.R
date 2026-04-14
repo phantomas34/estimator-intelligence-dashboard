@@ -5,6 +5,7 @@ library(lubridate)
 library(plotly)
 library(DBI)
 library(RPostgres)
+library(pool)
 library(scales)
 library(DT)
 library(shinyWidgets)
@@ -14,14 +15,15 @@ library(strucchange)    # ITS breakpoint detection
 library(lmtest)         # ITS coefficient testing (coeftest, waldtest)
 
 # --- DATABASE CONNECTION ---
-connect_db <- function() {
-  dbConnect(RPostgres::Postgres(),
-            dbname   = Sys.getenv("DB_NAME", "sales_db"),
-            host     = Sys.getenv("DB_HOST", "localhost"),
-            port     = as.numeric(Sys.getenv("DB_PORT", "5433")),
-            user     = Sys.getenv("DB_USER", Sys.info()[["user"]]),
-            password = Sys.getenv("DB_PASS", ""))
-}
+pool <- dbPool(
+  drv      = RPostgres::Postgres(),
+  dbname   = Sys.getenv("DB_NAME", "sales_db"),
+  host     = Sys.getenv("DB_HOST", "localhost"),
+  port     = as.numeric(Sys.getenv("DB_PORT", "5433")),
+  user     = Sys.getenv("DB_USER", Sys.info()[["user"]]),
+  password = Sys.getenv("DB_PASS", "")
+)
+onStop(function() poolClose(pool))
 
 # ---------------------------------------------------------------------------
 # UI
@@ -370,15 +372,12 @@ server <- function(input, output, session) {
   get_data <- reactive({
     input$refresh
     data_trigger()
-    con <- tryCatch(connect_db(), error = function(e) NULL)
-    if (is.null(con)) return(data.frame())
-    if (!dbExistsTable(con, "monthly_sales")) { dbDisconnect(con); return(data.frame()) }
-    df <- dbGetQuery(con, "
+    if (!dbExistsTable(pool, "monthly_sales")) return(data.frame())
+    df <- dbGetQuery(pool, "
       SELECT e.primary_name, s.*, EXTRACT(YEAR FROM s.report_date) AS year_num
       FROM monthly_sales s
       JOIN estimators e ON s.estimator_id = e.id
     ")
-    dbDisconnect(con)
     df
   })
   
@@ -397,37 +396,38 @@ server <- function(input, output, session) {
                  Estimator %in% c("SW", "SH")      ~ "Scott Hutchings",
                  TRUE                               ~ Estimator))
       
-      con <- connect_db()
-      dbExecute(con, "CREATE TABLE IF NOT EXISTS estimators (
+      dbExecute(pool, "CREATE TABLE IF NOT EXISTS estimators (
         id SERIAL PRIMARY KEY, primary_name VARCHAR(100) UNIQUE NOT NULL,
         active BOOLEAN DEFAULT TRUE);")
-      dbExecute(con, "CREATE TABLE IF NOT EXISTS monthly_sales (
+      dbExecute(pool, "CREATE TABLE IF NOT EXISTS monthly_sales (
         id SERIAL PRIMARY KEY, estimator_id INTEGER REFERENCES estimators(id),
         report_date DATE NOT NULL, amt_bid NUMERIC(15,2), qty_bid INTEGER,
         amt_booked NUMERIC(15,2), qty_booked INTEGER,
         UNIQUE(estimator_id, report_date));")
       
       for (nm in unique(clean$clean_name))
-        tryCatch(dbExecute(con,
+        tryCatch(dbExecute(pool,
                            "INSERT INTO estimators (primary_name) VALUES ($1) ON CONFLICT DO NOTHING",
                            params = list(nm)), error = function(e) NULL)
       
-      est_map <- dbGetQuery(con, "SELECT id, primary_name FROM estimators")
+      est_map <- dbGetQuery(pool, "SELECT id, primary_name FROM estimators")
       upload  <- clean %>%
         left_join(est_map, by = c("clean_name" = "primary_name")) %>%
         select(estimator_id = id, report_date,
                amt_bid = AmtBid, qty_bid = QtyBid,
                amt_booked = AmtBooked, qty_booked = QtyBooked)
       
-      dbWriteTable(con, "staging_sales", upload, overwrite = TRUE, temporary = TRUE)
-      n <- dbExecute(con, "
+      # Use a temporary connection from the pool for dbWriteTable
+      conn <- poolCheckout(pool)
+      on.exit(poolReturn(conn), add = TRUE)
+      dbWriteTable(conn, "staging_sales", upload, overwrite = TRUE, temporary = TRUE)
+      n <- dbExecute(conn, "
         INSERT INTO monthly_sales
           (estimator_id,report_date,amt_bid,qty_bid,amt_booked,qty_booked)
         SELECT estimator_id,report_date,amt_bid,qty_bid,amt_booked,qty_booked
         FROM staging_sales
         ON CONFLICT (estimator_id, report_date) DO NOTHING;")
-      dbExecute(con, "DROP TABLE IF EXISTS staging_sales")
-      dbDisconnect(con)
+      dbExecute(conn, "DROP TABLE IF EXISTS staging_sales")
       
       showNotification(paste("Success! Added/Merged", n, "records."), type = "message")
       data_trigger(data_trigger() + 1)
