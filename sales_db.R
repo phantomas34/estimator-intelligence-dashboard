@@ -2,7 +2,7 @@ library(DBI)
 library(RPostgres)
 
 # 1. Connect to the system database to create your App DB
-# Note: We use Sys.info()[["user"]] to get your Mac username automatically
+
 sys_con <- dbConnect(RPostgres::Postgres(), 
                      dbname = "postgres", 
                      host = "localhost", 
@@ -29,7 +29,7 @@ con <- dbConnect(RPostgres::Postgres(),
                  password = "")
 
 # 4. Create Tables (Embedded SQL to ensure it works)
-# Create Estimators Table
+
 dbExecute(con, "
   CREATE TABLE IF NOT EXISTS estimators (
     id SERIAL PRIMARY KEY,

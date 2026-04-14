@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  # Container 1: The Database
+  db:
+    image: postgres:latest
+    environment:
+      POSTGRES_USER: shiny_user
+      POSTGRES_PASSWORD: shiny_password
+      POSTGRES_DB: sales_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  # Container 2: R Shiny App
+  shiny_app:
+    build: .
+    ports:
+      - "3838:3838"
+    depends_on:
+      - db
+    environment:
+      # These variables override the settings in your R code
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: shiny_user
+      DB_PASS: shiny_password
+      DB_NAME: sales_db
+
+volumes:
+  postgres_data:

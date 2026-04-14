@@ -1,0 +1,238 @@
+---
+title:  "Estimator Intelligence Report"
+subtitle: "Preconstruction Performance Analysis"
+date:   "`r params$report_date`"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: true
+    toc_depth: 2
+    number_sections: false
+    fig_caption: true
+    fig_height: 4
+    fig_width: 7
+    keep_tex: false
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{longtable}
+  - \usepackage{array}
+  - \usepackage{multirow}
+  - \usepackage{xcolor}
+  - \usepackage{geometry}
+  - \usepackage{fancyhdr}
+  - \usepackage{titling}
+  - \usepackage{float}
+  - \geometry{margin=1in, top=0.9in, bottom=0.9in}
+  - \definecolor{primary}{HTML}{2c3e50}
+  - \definecolor{success}{HTML}{27ae60}
+  - \definecolor{info}{HTML}{3c8dbc}
+  - \definecolor{muted}{HTML}{7f8c8d}
+  - \definecolor{graybg}{HTML}{f4f6f9}
+  - \pagestyle{fancy}
+  - \fancyhf{}
+  - \fancyhead[L]{\textcolor{primary}{\textbf{\small Estimator Intelligence}}}
+  - \fancyhead[R]{\textcolor{info}{\small \thepage}}
+  - \fancyfoot[C]{\textcolor{muted}{\footnotesize Confidential — Internal Use Only}}
+  - \renewcommand{\headrulewidth}{0.4pt}
+  - \renewcommand{\headrule}{\hbox to\headwidth{\color{primary}\leaders\hrule height \headrulewidth\hfill}}
+params:
+  data_path:   NULL
+  date_start:  "N/A"
+  date_end:    "N/A"
+  estimators:  "All Estimators"
+  win_lag:     3
+  report_date: "N/A"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = FALSE,
+  warning   = FALSE,
+  message   = FALSE,
+  fig.align = "center",
+  fig.pos   = "H"
+)
+
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(knitr)
+library(kableExtra)
+
+# ── Load data ────────────────────────────────────────────────────────────────
+df <- readRDS(params$data_path)
+
+# ── Color palette (Dashboard Matching) ───────────────────────────────────────
+col_primary <- "#2c3e50" # Dark Navy/Slate
+col_success <- "#27ae60" # Green (Booked)
+col_info    <- "#3c8dbc" # Light Blue
+col_danger  <- "#c0392b" # Red (UCL/LCL)
+col_anomaly <- "#e74c3c" # Bright Red
+col_bid     <- "#95a5a6" # Grey (Bid Volume)
+col_mean    <- "#2980b9" # Blue (SPC Mean)
+col_bg      <- "#f4f6f9" # Dashboard content wrapper background
+
+# ── ggplot theme ─────────────────────────────────────────────────────────────
+theme_report <- function() {
+  theme_minimal(base_size = 10) %+replace%
+    theme(
+      plot.background    = element_rect(fill = "white", color = NA),
+      panel.background   = element_rect(fill = "white", color = NA),
+      panel.grid.major   = element_line(color = "#ecf0f5", linewidth = 0.5),
+      panel.grid.minor   = element_blank(),
+      axis.text          = element_text(color = "#333333", size = 8),
+      axis.title         = element_text(color = col_primary, size = 9, face = "bold"),
+      plot.title         = element_text(color = col_primary, size = 11, face = "bold", hjust = 0),
+      plot.subtitle      = element_text(color = "#7f8c8d", size = 8, hjust = 0),
+      legend.background  = element_rect(fill = "white", color = NA),
+      legend.text        = element_text(color = "#333333", size = 8),
+      legend.title       = element_text(color = col_primary, size = 8, face = "bold"),
+      strip.background   = element_rect(fill = col_bg, color = NA),
+      strip.text         = element_text(color = col_primary, size = 8, face = "bold")
+    )
+}
+
+# ── KPI helpers ───────────────────────────────────────────────────────────────
+total_bid    <- sum(df$amt_bid,    na.rm = TRUE)
+total_booked <- sum(df$amt_booked, na.rm = TRUE)
+win_rate_pct <- if(total_bid > 0) total_booked / total_bid else 0
+job_win_rate <- if(sum(df$qty_bid, na.rm = TRUE) > 0) sum(df$qty_booked, na.rm = TRUE) / sum(df$qty_bid, na.rm = TRUE) else 0
+n_estimators <- length(unique(df$primary_name))
+
+fmt_dollar <- function(x) dollar(x, accuracy = 1, scale = 1e-3, suffix = "K")
+
+
+\newpage
+
+\textcolor{primary}{\Large\textbf{Report Summary}}
+
+\vspace{0.3cm}
+
+\begin{tabular}{ll}
+\textbf{Reporting Period:} & r params$date_start — r params$date_end \
+\textbf{Estimator Scope:} & r params$estimators \
+\textbf{Win Rate Lag:} & r params$win_lag month(s) \
+\textbf{Generated:} & r params$report_date \
+\end{tabular}
+
+\vspace{0.5cm}
+\hrule
+\vspace{0.5cm}
+
+Executive KPIs
+
+kpi_df <- tibble(
+  Metric = c(
+    "Total Bid Volume",
+    "Total Booked Revenue",
+    "Dollar Win Rate (same-month)",
+    "Job Win Rate (same-month)",
+    "Active Estimators in Period"
+  ),
+  Value = c(
+    dollar(total_bid,    accuracy = 1),
+    dollar(total_booked, accuracy = 1),
+    percent(win_rate_pct, accuracy = 0.1),
+    percent(job_win_rate, accuracy = 0.1),
+    as.character(n_estimators)
+  )
+)
+
+kable(kpi_df, booktabs = TRUE, col.names = c("Metric", "Value"),
+      caption = "Key Performance Indicators for the Selected Period") %>%
+  kable_styling(latex_options = c("striped", "HOLD_position"),
+                stripe_color  = "#f4f6f9",
+                full_width    = FALSE,
+                position      = "left") %>%
+  column_spec(1, bold = TRUE, width = "8cm") %>%
+  column_spec(2, width = "4cm") %>%
+  row_spec(0, background = "#2c3e50", color = "white", bold = TRUE)
+
+\newpage
+
+annual <- df %>%
+  mutate(Year = year(report_date)) %>%
+  group_by(Year) %>%
+  summarise(
+    Bid    = sum(amt_bid,    na.rm = TRUE),
+    Booked = sum(amt_booked, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(c(Bid, Booked), names_to = "Type", values_to = "Amount")
+
+ggplot(annual, aes(factor(Year), Amount, fill = Type)) +
+  geom_col(position = "dodge", width = 0.7) +
+  scale_fill_manual(values = c("Bid" = col_bid, "Booked" = col_success)) +
+  scale_y_continuous(labels = function(x) dollar(x, accuracy = 1, scale = 1e-3, suffix = "K")) +
+  labs(x = "Year", y = "Amount ($)", fill = NULL,
+       title    = "Annual Bid vs. Booked Revenue",
+       subtitle = paste("Period:", params$date_start, "—", params$date_end)) +
+  theme_report() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+\newpage
+
+lb <- df %>%
+  group_by(primary_name) %>%
+  summarise(
+    `Total Bids`    = sum(amt_bid,    na.rm = TRUE),
+    `Total Revenue` = sum(amt_booked, na.rm = TRUE),
+    `Jobs Bid`      = sum(qty_bid,    na.rm = TRUE),
+    `Jobs Won`      = sum(qty_booked, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    `Win Rate`      = if_else(`Total Bids` > 0, `Total Revenue` / `Total Bids`, 0),
+    `Avg Job Size`  = if_else(`Jobs Bid` > 0, `Total Bids` / `Jobs Bid`, 0)
+  ) %>%
+  arrange(desc(`Total Revenue`)) %>%
+  mutate(
+    `Total Bids`    = dollar(`Total Bids`,    accuracy = 1),
+    `Total Revenue` = dollar(`Total Revenue`, accuracy = 1),
+    `Win Rate`      = percent(`Win Rate`,     accuracy = 0.1),
+    `Avg Job Size`  = dollar(`Avg Job Size`,  accuracy = 1)
+  ) %>%
+  rename(Estimator = primary_name)
+
+kable(lb, booktabs = TRUE, longtable = TRUE,
+      caption = "Full Estimator Performance Summary — Selected Period") %>%
+  kable_styling(latex_options = c("striped", "HOLD_position", "repeat_header"),
+                stripe_color  = "#f4f6f9",
+                font_size     = 9,
+                full_width    = FALSE) %>%
+  row_spec(0, background = "#2c3e50", color = "white", bold = TRUE) %>%
+  column_spec(1, bold = TRUE)
+
+\newpage
+
+seasonal <- df %>%
+  mutate(
+    Month_Num  = month(report_date),
+    Month_Name = month(report_date, label = TRUE, abbr = FALSE),
+    Year       = year(report_date)
+  ) %>%
+  group_by(Month_Num, Month_Name, Year) %>%
+  summarise(Booked = sum(amt_booked, na.rm = TRUE), .groups = "drop") %>%
+  group_by(Month_Num, Month_Name) %>%
+  summarise(Avg_Booked = mean(Booked, na.rm = TRUE), .groups = "drop") %>%
+  arrange(Month_Num)
+
+ggplot(seasonal, aes(x = fct_reorder(Month_Name, Month_Num), y = Avg_Booked)) +
+  geom_col(fill = col_info, width = 0.7) +
+  geom_text(aes(label = dollar(Avg_Booked, accuracy = 1, scale = 1e-3, suffix = "K")),
+            vjust = -0.4, size = 2.8, color = col_primary) +
+  scale_y_continuous(
+    labels = function(x) dollar(x, accuracy = 1, scale = 1e-3, suffix = "K"),
+    expand = expansion(mult = c(0, 0.15))
+  ) +
+  labs(x = NULL, y = "Avg Booked Revenue ($K)",
+       title    = "Average Booked Revenue by Calendar Month",
+       subtitle = "Historical average across all years in dataset") +
+  theme_report() +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1),
+        panel.grid.major.x = element_blank())
+
+\vspace{1cm}
+\begin{center}
+\textcolor{primary}{\rule{0.4\linewidth}{0.6pt}} \quad \textcolor{muted}{\footnotesize Generated by Estimator Intelligence Dashboard} \quad \textcolor{primary}{\rule{0.4\linewidth}{0.6pt}}
+\end{center}
