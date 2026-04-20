@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y \
 RUN R -e "install.packages(c('shinydashboard', 'tidyverse', 'lubridate', 'plotly', 'DBI', 'RPostgres', 'scales', 'DT', 'shinyWidgets'), repos='https://cloud.r-project.org/')"
 
 # Copy  app code into the container
-COPY app.R /srv/shiny-server/
+COPY global.R ui.R server.R /srv/shiny-server/
 
 # Expose the port used by Shiny
 EXPOSE 3838
