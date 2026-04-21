@@ -10,11 +10,12 @@ library(scales)
 library(DT)
 library(shinyWidgets)
 library(cluster)
-library(rmarkdown)
-library(pool) # NEW: For connection pooling
+library(openxlsx)       # Tier 1 Excel report
+library(strucchange)    # ITS breakpoint detection
+library(lmtest)         # ITS coefficient testing
+library(pool)           # Connection pooling
 
 # 1. ESTABLISH DATABASE CONNECTION POOL
-# This creates a stable pool of connections that all users share efficiently.
 db_pool <- dbPool(
   drv = RPostgres::Postgres(),
   dbname   = Sys.getenv("DB_NAME", "sales_db"),
@@ -24,13 +25,11 @@ db_pool <- dbPool(
   password = Sys.getenv("DB_PASS", "")
 )
 
-# Ensure the pool closes safely when the app shuts down
 onStop(function() {
   poolClose(db_pool)
 })
 
-# 2. GLOBAL MATH FUNCTIONS
-# Moving the SPC math here keeps the server file clean and readable.
+# 2. GLOBAL SPC LIMITS FUNCTION (Restored to prevent app crash)
 spc_limits <- function(df, metric_col, is_quarterly, by_person = FALSE, bl_start, bl_end) {
   grp_date <- function(d) if (is_quarterly) floor_date(d, "quarter") else floor_date(d, "month")
   
@@ -77,4 +76,3 @@ spc_limits <- function(df, metric_col, is_quarterly, by_person = FALSE, bl_start
              Anomaly = ifelse(Val > UCL | Val < LCL, "Anomaly", "Normal"))
   }
 }
-

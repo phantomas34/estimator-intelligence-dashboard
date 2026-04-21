@@ -7,7 +7,7 @@ sys_con <- dbConnect(RPostgres::Postgres(),
                      dbname = "postgres", # Default system DB
                      host = "localhost", 
                      user = "postgres", 
-                     password = "your_password_here") # <--- UPDATE THIS
+                     password = "your_password_here") # 
 
 
 tryCatch({
