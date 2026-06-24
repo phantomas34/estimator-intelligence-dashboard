@@ -13,7 +13,6 @@ dashboardPage(
       menuItem("Top Brief",           tabName = "ceo_brief", icon = icon("briefcase")),
       menuItem("Executive Dashboard",   tabName = "dashboard", icon = icon("chart-area")),
       menuItem("Intervention Analysis", tabName = "its",       icon = icon("flask")),
-      menuItem("Estimator Scatter",     tabName = "scatter",   icon = icon("circle-dot")),
       menuItem("Data Management",       tabName = "admin",     icon = icon("database")),
       menuItem("Client Intelligence", tabName = "client_intel", icon = icon("handshake")),
       hr(),
@@ -358,67 +357,8 @@ dashboardPage(
               )
       ),
       
-      # ── ESTIMATOR SCATTER ────────────────────────────────────────────────
-      tabItem(tabName = "scatter",
-              
-              fluidRow(
-                box(
-                  title       = "Estimator Scatter \u2014 Bid Behavior vs. Conversion",
-                  width       = 12,
-                  status      = "primary",
-                  solidHeader = TRUE,
-                  
-                  # ── Axis / bubble controls ────────────────────────────────
-                  fluidRow(
-                    column(4,
-                           selectInput(
-                             inputId  = "scatter_x",
-                             label    = "X Axis",
-                             choices  = c(
-                               "Avg Bid Size ($)"     = "avg_bid_size",
-                               "Total Bid Volume ($)" = "total_amt_bid",
-                               "Bid Count"            = "total_qty_bid"
-                             ),
-                             selected = "avg_bid_size"
-                           )
-                    ),
-                    column(4,
-                           selectInput(
-                             inputId  = "scatter_y",
-                             label    = "Y Axis",
-                             choices  = c(
-                               "Win Rate (%)"            = "win_rate",
-                               "Avg Booked Size ($)"     = "avg_booked_size",
-                               "Total Booked Volume ($)" = "total_amt_booked"
-                             ),
-                             selected = "win_rate"
-                           )
-                    ),
-                    column(4,
-                           selectInput(
-                             inputId  = "scatter_size",
-                             label    = "Bubble Size",
-                             choices  = c(
-                               "Total Bid Volume ($)" = "total_amt_bid",
-                               "Bid Count"            = "total_qty_bid",
-                               "Total Booked ($)"     = "total_amt_booked"
-                             ),
-                             selected = "total_amt_bid"
-                           )
-                    )
-                  ),
-                  
-                  # ── Plot ─────────────────────────────────────────────────
-                  plotlyOutput("scatter_plot", height = "520px"),
-                  
-                  # ── Footnote ─────────────────────────────────────────────
-                  p(class = "text-muted", style = "font-size:11px; margin-top:6px;",
-                    "Bubble area proportional to selected size metric. Win rate is same-month unless Lag > 0 is set in the sidebar, in which case the lag-adjusted rate is used. Estimators with fewer than 3 bids in the selected period are excluded. Hover for detail.")
-                )
-              )
-      ),
-      
       # ── DATA MANAGEMENT ─────────────────────────────────────────────────
+      
       tabItem(tabName = "admin",
               
               fluidRow(
@@ -448,158 +388,158 @@ dashboardPage(
               )
       ),
       tabItem(tabName = "client_intel",
-             
-             # ── HEADER NOTE ────────────────────────────────────────────────────────────
-             fluidRow(
-               box(
-                 width = 12, status = "info", solidHeader = FALSE,
-                 div(style = "padding:4px 0;",
-                     p(style = "margin:0; font-size:13px; color:#2c3e50;",
-                       icon("flask"), " ",
-                       tags$b("Experimental Tab — "),
-                       "Powered by IMS bid follow-up records. Shows contractor relationships,
+              
+              # ── HEADER NOTE ────────────────────────────────────────────────────────────
+              fluidRow(
+                box(
+                  width = 12, status = "info", solidHeader = FALSE,
+                  div(style = "padding:4px 0;",
+                      p(style = "margin:0; font-size:13px; color:#2c3e50;",
+                        icon("flask"), " ",
+                        tags$b("Experimental Tab — "),
+                        "Powered by IMS bid follow-up records. Shows contractor relationships,
            pipeline activity, and award signals extracted from estimator field notes.
            Data source: ", tags$code("bid___follow_up"), " joined to ",
-                       tags$code("estimators"), "."
-                     )
-                 )
-               )
-             ),
-             
-             # ── ROW 1: KPIs ────────────────────────────────────────────────────────────
-             fluidRow(
-               valueBoxOutput("ci_kpi_followups",   width = 3),
-               valueBoxOutput("ci_kpi_contractors", width = 3),
-               valueBoxOutput("ci_kpi_top_est",     width = 3),
-               valueBoxOutput("ci_kpi_date_range",  width = 3)
-             ),
-             
-             # ── ROW 2: FILTERS ─────────────────────────────────────────────────────────
-             fluidRow(
-               box(
-                 width = 12, status = "primary", solidHeader = TRUE,
-                 title = "Filters",
-                 fluidRow(
-                   column(4,
-                          pickerInput(
-                            "ci_estimator", "Estimator",
-                            choices  = NULL, multiple = TRUE,
-                            options  = list(
-                              `actions-box`          = TRUE,
-                              `live-search`          = TRUE,
-                              `selected-text-format` = "count > 2",
-                              `count-selected-text`  = "{0} Selected",
-                              `none-selected-text`   = "All Estimators"
-                            )
-                          )
-                   ),
-                   column(4,
-                          dateRangeInput(
-                            "ci_date_range", "Date Range",
-                            start     = Sys.Date() %m-% months(36),
-                            end       = Sys.Date(),
-                            separator = " to "
-                          )
-                   ),
-                   column(4,
-                          pickerInput(
-                            "ci_contractor", "Contractor (GC)",
-                            choices  = NULL, multiple = TRUE,
-                            options  = list(
-                              `actions-box`          = TRUE,
-                              `live-search`          = TRUE,
-                              `selected-text-format` = "count > 2",
-                              `none-selected-text`   = "All Contractors"
-                            )
-                          )
-                   )
-                 )
-               )
-             ),
-             
-             # ── ROW 3: TOP CONTRACTORS + ACTIVITY TIMELINE ─────────────────────────────
-             fluidRow(
-               box(
-                 title = "Top Contractors by Follow-Up Activity",
-                 status = "primary", solidHeader = TRUE, width = 6,
-                 fluidRow(
-                   column(6,
-                          radioGroupButtons(
-                            "ci_contractor_metric", NULL,
-                            choices  = c("Follow-Ups" = "followups", "Estimators" = "estimators"),
-                            selected = "followups",
-                            status = "default", size = "xs", justified = TRUE
-                          )
-                   ),
-                   column(6,
-                          sliderInput(
-                            "ci_top_n", "Show Top N",
-                            min = 5, max = 25, value = 15, step = 5, ticks = FALSE
-                          )
-                   )
-                 ),
-                 plotlyOutput("ci_contractor_chart", height = "380px"),
-                 p(class = "text-muted", style = "font-size:11px;",
-                   "Bars show total follow-up contacts per GC across all selected estimators.
+                        tags$code("estimators"), "."
+                      )
+                  )
+                )
+              ),
+              
+              # ── ROW 1: KPIs ────────────────────────────────────────────────────────────
+              fluidRow(
+                valueBoxOutput("ci_kpi_followups",   width = 3),
+                valueBoxOutput("ci_kpi_contractors", width = 3),
+                valueBoxOutput("ci_kpi_top_est",     width = 3),
+                valueBoxOutput("ci_kpi_date_range",  width = 3)
+              ),
+              
+              # ── ROW 2: FILTERS ─────────────────────────────────────────────────────────
+              fluidRow(
+                box(
+                  width = 12, status = "primary", solidHeader = TRUE,
+                  title = "Filters",
+                  fluidRow(
+                    column(4,
+                           pickerInput(
+                             "ci_estimator", "Estimator",
+                             choices  = NULL, multiple = TRUE,
+                             options  = list(
+                               `actions-box`          = TRUE,
+                               `live-search`          = TRUE,
+                               `selected-text-format` = "count > 2",
+                               `count-selected-text`  = "{0} Selected",
+                               `none-selected-text`   = "All Estimators"
+                             )
+                           )
+                    ),
+                    column(4,
+                           dateRangeInput(
+                             "ci_date_range", "Date Range",
+                             start     = Sys.Date() %m-% months(36),
+                             end       = Sys.Date(),
+                             separator = " to "
+                           )
+                    ),
+                    column(4,
+                           pickerInput(
+                             "ci_contractor", "Contractor (GC)",
+                             choices  = NULL, multiple = TRUE,
+                             options  = list(
+                               `actions-box`          = TRUE,
+                               `live-search`          = TRUE,
+                               `selected-text-format` = "count > 2",
+                               `none-selected-text`   = "All Contractors"
+                             )
+                           )
+                    )
+                  )
+                )
+              ),
+              
+              # ── ROW 3: TOP CONTRACTORS + ACTIVITY TIMELINE ─────────────────────────────
+              fluidRow(
+                box(
+                  title = "Top Contractors by Follow-Up Activity",
+                  status = "primary", solidHeader = TRUE, width = 6,
+                  fluidRow(
+                    column(6,
+                           radioGroupButtons(
+                             "ci_contractor_metric", NULL,
+                             choices  = c("Follow-Ups" = "followups", "Estimators" = "estimators"),
+                             selected = "followups",
+                             status = "default", size = "xs", justified = TRUE
+                           )
+                    ),
+                    column(6,
+                           sliderInput(
+                             "ci_top_n", "Show Top N",
+                             min = 5, max = 25, value = 15, step = 5, ticks = FALSE
+                           )
+                    )
+                  ),
+                  plotlyOutput("ci_contractor_chart", height = "380px"),
+                  p(class = "text-muted", style = "font-size:11px;",
+                    "Bars show total follow-up contacts per GC across all selected estimators.
          'Estimators' mode shows how many different estimators have contacted each GC.")
-               ),
-               
-               box(
-                 title = "Follow-Up Activity Timeline",
-                 status = "primary", solidHeader = TRUE, width = 6,
-                 fluidRow(
-                   column(6,
-                          radioGroupButtons(
-                            "ci_timeline_grain", NULL,
-                            choices  = c("Monthly" = "month", "Quarterly" = "quarter"),
-                            selected = "month",
-                            status = "default", size = "xs", justified = TRUE
-                          )
-                   ),
-                   column(6,
-                          radioGroupButtons(
-                            "ci_timeline_mode", NULL,
-                            choices  = c("Aggregate" = "agg", "By Estimator" = "ind"),
-                            selected = "agg",
-                            status = "default", size = "xs", justified = TRUE
-                          )
-                   )
-                 ),
-                 plotlyOutput("ci_timeline_chart", height = "380px"),
-                 p(class = "text-muted", style = "font-size:11px;",
-                   "Monthly or quarterly count of follow-up contacts logged.
+                ),
+                
+                box(
+                  title = "Follow-Up Activity Timeline",
+                  status = "primary", solidHeader = TRUE, width = 6,
+                  fluidRow(
+                    column(6,
+                           radioGroupButtons(
+                             "ci_timeline_grain", NULL,
+                             choices  = c("Monthly" = "month", "Quarterly" = "quarter"),
+                             selected = "month",
+                             status = "default", size = "xs", justified = TRUE
+                           )
+                    ),
+                    column(6,
+                           radioGroupButtons(
+                             "ci_timeline_mode", NULL,
+                             choices  = c("Aggregate" = "agg", "By Estimator" = "ind"),
+                             selected = "agg",
+                             status = "default", size = "xs", justified = TRUE
+                           )
+                    )
+                  ),
+                  plotlyOutput("ci_timeline_chart", height = "380px"),
+                  p(class = "text-muted", style = "font-size:11px;",
+                    "Monthly or quarterly count of follow-up contacts logged.
          Reveals pipeline activity intensity over time.")
-               )
-             ),
-             
-             # ── ROW 4: ESTIMATOR × CONTRACTOR MATRIX + AWARD FEED ─────────────────────
-             fluidRow(
-               box(
-                 title = "Estimator \u00d7 Contractor Relationship Matrix",
-                 status = "primary", solidHeader = TRUE, width = 5,
-                 plotlyOutput("ci_matrix_chart", height = "400px"),
-                 p(class = "text-muted", style = "font-size:11px;",
-                   "Heatmap of follow-up contacts. Darker = stronger relationship.
+                )
+              ),
+              
+              # ── ROW 4: ESTIMATOR × CONTRACTOR MATRIX + AWARD FEED ─────────────────────
+              fluidRow(
+                box(
+                  title = "Estimator \u00d7 Contractor Relationship Matrix",
+                  status = "primary", solidHeader = TRUE, width = 5,
+                  plotlyOutput("ci_matrix_chart", height = "400px"),
+                  p(class = "text-muted", style = "font-size:11px;",
+                    "Heatmap of follow-up contacts. Darker = stronger relationship.
          Reveals which estimators own which GC relationships.")
-               ),
-               
-               box(
-                 title = "Award Signal Feed \u2014 Notes containing win/award language",
-                 status = "warning", solidHeader = TRUE, width = 7,
-                 fluidRow(
-                   column(12,
-                          p(style = "font-size:12px; color:#5A6A72; margin-bottom:6px;",
-                            "Filtered for notes containing: ",
-                            tags$b("awarded, booked, proceed, LOI, notice to proceed, doing this project, re-awarded")
-                          )
-                   )
-                 ),
-                 dataTableOutput("ci_award_feed"),
-                 p(class = "text-muted", style = "font-size:11px; margin-top:6px;",
-                   "Award signals extracted from IMS follow-up notes. Use as a win log proxy
+                ),
+                
+                box(
+                  title = "Award Signal Feed \u2014 Notes containing win/award language",
+                  status = "warning", solidHeader = TRUE, width = 7,
+                  fluidRow(
+                    column(12,
+                           p(style = "font-size:12px; color:#5A6A72; margin-bottom:6px;",
+                             "Filtered for notes containing: ",
+                             tags$b("awarded, booked, proceed, LOI, notice to proceed, doing this project, re-awarded")
+                           )
+                    )
+                  ),
+                  dataTableOutput("ci_award_feed"),
+                  p(class = "text-muted", style = "font-size:11px; margin-top:6px;",
+                    "Award signals extracted from IMS follow-up notes. Use as a win log proxy
          until full bid outcome data is available.")
-               )
-             )
+                )
+              )
       )
       
       
