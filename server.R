@@ -1510,4 +1510,299 @@ function(input, output, session) {
       })
     }
   )
+
+  # ── IMS DATA FETCH ────────────────────────────────────────────────────────────
+  
+  get_ims_data <- reactive({
+    input$refresh  # ties into the existing Refresh button
+    
+    # Check the table exists before querying
+    if (!dbExistsTable(db_pool, "bid___follow_up")) return(data.frame())
+    
+    dbGetQuery(db_pool, "
+    SELECT
+      fu.bidfuid,
+      fu.bidprojectid,
+      fu.projectname,
+      fu.bidfudate                          AS follow_up_date,
+      fu.bidfucontractor                    AS contractor,
+      fu.bidfucontact                       AS contact,
+      fu.bidfunotes                         AS notes,
+      fu.bidfucreatedby                     AS estimator_raw,
+      -- Normalise Scott W. Hutchings → Scott Hutchings to match estimators table
+      CASE
+        WHEN LOWER(TRIM(fu.bidfucreatedby)) = 'scott w. hutchings' THEN 'Scott Hutchings'
+        ELSE TRIM(fu.bidfucreatedby)
+      END                                   AS estimator
+    FROM bid___follow_up fu
+    WHERE fu.bidfucreatedby IS NOT NULL
+      AND fu.bidfucreatedby != ''
+      AND fu.bidfudate      IS NOT NULL
+    ORDER BY fu.bidfudate DESC
+  ")
+  })
+  
+  
+  # ── POPULATE CI FILTER DROPDOWNS ──────────────────────────────────────────────
+  
+  observe({
+    df <- get_ims_data()
+    if (nrow(df) == 0) return()
+    
+    estimators  <- sort(unique(df$estimator))
+    contractors <- sort(unique(df$contractor[!is.na(df$contractor) & df$contractor != ""]))
+    
+    updatePickerInput(session, "ci_estimator",  choices = estimators)
+    updatePickerInput(session, "ci_contractor", choices = contractors)
+    
+    # Default date range to full span of the data
+    min_dt <- min(df$follow_up_date, na.rm = TRUE)
+    max_dt <- max(df$follow_up_date, na.rm = TRUE)
+    updateDateRangeInput(session, "ci_date_range", start = min_dt, end = max_dt)
+  })
+  
+  
+  # ── FILTERED IMS DATA ─────────────────────────────────────────────────────────
+  
+  ci_filtered <- reactive({
+    df <- get_ims_data()
+    if (nrow(df) == 0) return(df)
+    
+    # Date filter
+    req(input$ci_date_range)
+    df <- df %>%
+      filter(follow_up_date >= input$ci_date_range[1],
+             follow_up_date <= input$ci_date_range[2])
+    
+    # Estimator filter
+    sel_est <- input$ci_estimator
+    if (!is.null(sel_est) && length(sel_est) > 0)
+      df <- df %>% filter(estimator %in% sel_est)
+    
+    # Contractor filter
+    sel_con <- input$ci_contractor
+    if (!is.null(sel_con) && length(sel_con) > 0)
+      df <- df %>% filter(contractor %in% sel_con)
+    
+    df
+  })
+  
+  
+  # ── KPIs ─────────────────────────────────────────────────────────────────────
+  
+  output$ci_kpi_followups <- renderValueBox({
+    df <- ci_filtered()
+    valueBox(
+      comma(nrow(df)),
+      "Total Follow-Ups",
+      icon  = icon("phone"),
+      color = "blue"
+    )
+  })
+  
+  output$ci_kpi_contractors <- renderValueBox({
+    df <- ci_filtered()
+    n  <- length(unique(df$contractor[!is.na(df$contractor)]))
+    valueBox(
+      comma(n),
+      "Unique Contractors",
+      icon  = icon("building"),
+      color = "green"
+    )
+  })
+  
+  output$ci_kpi_top_est <- renderValueBox({
+    df <- ci_filtered()
+    if (nrow(df) == 0) return(valueBox("—", "Most Active Estimator", icon = icon("user"), color = "yellow"))
+    top <- df %>%
+      count(estimator, sort = TRUE) %>%
+      slice(1)
+    valueBox(
+      top$estimator,
+      paste0("Most Active (", comma(top$n), " follow-ups)"),
+      icon  = icon("user"),
+      color = "yellow"
+    )
+  })
+  
+  output$ci_kpi_date_range <- renderValueBox({
+    df <- ci_filtered()
+    if (nrow(df) == 0) return(valueBox("—", "Data Span", icon = icon("calendar"), color = "purple"))
+    min_dt <- min(df$follow_up_date, na.rm = TRUE)
+    max_dt <- max(df$follow_up_date, na.rm = TRUE)
+    valueBox(
+      paste0(format(min_dt, "%b %Y"), " — ", format(max_dt, "%b %Y")),
+      "Follow-Up Date Span",
+      icon  = icon("calendar"),
+      color = "purple"
+    )
+  })
+  
+  
+  # ── TOP CONTRACTORS BAR CHART ─────────────────────────────────────────────────
+  
+  output$ci_contractor_chart <- renderPlotly({
+    df <- ci_filtered()
+    validate(need(nrow(df) > 0, "No follow-up data for selected filters."))
+    
+    top_n  <- input$ci_top_n
+    metric <- input$ci_contractor_metric
+    
+    if (metric == "estimators") {
+      agg <- df %>%
+        filter(!is.na(contractor), contractor != "") %>%
+        group_by(contractor) %>%
+        summarise(value = n_distinct(estimator), .groups = "drop") %>%
+        arrange(desc(value)) %>%
+        slice_head(n = top_n) %>%
+        mutate(contractor = fct_reorder(contractor, value))
+      y_label <- "# Estimators"
+      bar_col <- "#3498db"
+    } else {
+      agg <- df %>%
+        filter(!is.na(contractor), contractor != "") %>%
+        count(contractor, name = "value") %>%
+        arrange(desc(value)) %>%
+        slice_head(n = top_n) %>%
+        mutate(contractor = fct_reorder(contractor, value))
+      y_label <- "Follow-Up Contacts"
+      bar_col <- "#2c3e50"
+    }
+    
+    p <- ggplot(agg, aes(x = contractor, y = value,
+                         text = paste0("<b>", contractor, "</b><br>",
+                                       y_label, ": ", comma(value)))) +
+      geom_col(fill = bar_col, width = 0.65) +
+      coord_flip() +
+      scale_y_continuous(labels = comma_format()) +
+      labs(x = "", y = y_label) +
+      theme_minimal() +
+      theme(panel.grid.major.y = element_blank(),
+            axis.text.y = element_text(size = 10))
+    
+    ggplotly(p, tooltip = "text")
+  })
+  
+  
+  # ── FOLLOW-UP ACTIVITY TIMELINE ───────────────────────────────────────────────
+  
+  output$ci_timeline_chart <- renderPlotly({
+    df <- ci_filtered()
+    validate(need(nrow(df) > 0, "No follow-up data for selected filters."))
+    
+    grain <- input$ci_timeline_grain
+    mode  <- input$ci_timeline_mode
+    
+    df <- df %>%
+      mutate(period = floor_date(follow_up_date, grain))
+    
+    if (mode == "ind") {
+      agg <- df %>%
+        group_by(period, estimator) %>%
+        summarise(n = n(), .groups = "drop")
+      
+      p <- ggplot(agg, aes(x = period, y = n, color = estimator,
+                           text = paste0("<b>", format(period, if (grain == "month") "%b %Y" else "Q%q %Y"),
+                                         "</b><br>", estimator, "<br>Follow-ups: ", comma(n)))) +
+        geom_line(linewidth = 0.9) +
+        geom_point(size = 2) +
+        scale_color_brewer(palette = "Paired") +
+        scale_y_continuous(labels = comma_format()) +
+        labs(x = "", y = "Follow-Up Count", color = "") +
+        theme_minimal() +
+        theme(legend.position = "bottom")
+    } else {
+      agg <- df %>%
+        group_by(period) %>%
+        summarise(n = n(), .groups = "drop")
+      
+      p <- ggplot(agg, aes(x = period, y = n, group = 1,
+                           text = paste0("<b>", format(period, if (grain == "month") "%b %Y" else "Q%q %Y"),
+                                         "</b><br>Follow-ups: ", comma(n)))) +
+        geom_line(color = "#2c3e50", linewidth = 1) +
+        geom_point(color = "#2c3e50", size = 2.5) +
+        geom_area(fill = "#2c3e50", alpha = 0.08) +
+        scale_y_continuous(labels = comma_format()) +
+        labs(x = "", y = "Follow-Up Count") +
+        theme_minimal()
+    }
+    
+    ggplotly(p, tooltip = "text")
+  })
+  
+  
+  # ── ESTIMATOR × CONTRACTOR MATRIX ─────────────────────────────────────────────
+  
+  output$ci_matrix_chart <- renderPlotly({
+    df <- ci_filtered()
+    validate(need(nrow(df) > 0, "No follow-up data for selected filters."))
+    
+    # Build matrix — top 12 contractors by volume to keep readable
+    top_contractors <- df %>%
+      filter(!is.na(contractor), contractor != "") %>%
+      count(contractor, sort = TRUE) %>%
+      slice_head(n = 12) %>%
+      pull(contractor)
+    
+    mat <- df %>%
+      filter(contractor %in% top_contractors) %>%
+      group_by(estimator, contractor) %>%
+      summarise(n = n(), .groups = "drop")
+    
+    p <- ggplot(mat, aes(x = estimator, y = contractor, fill = n,
+                         text = paste0("<b>", estimator, " \u00d7 ", contractor,
+                                       "</b><br>Follow-ups: ", n))) +
+      geom_tile(color = "white", linewidth = 0.5) +
+      scale_fill_gradient(low = "#eaf4fb", high = "#1a5276",
+                          name = "Follow-ups") +
+      labs(x = "", y = "") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+            axis.text.y = element_text(size = 9),
+            panel.grid  = element_blank())
+    
+    ggplotly(p, tooltip = "text")
+  })
+  
+  
+  # ── AWARD SIGNAL FEED ─────────────────────────────────────────────────────────
+  
+  output$ci_award_feed <- renderDataTable({
+    df <- ci_filtered()
+    validate(need(nrow(df) > 0, "No follow-up data for selected filters."))
+    validate(need("notes" %in% names(df), "Notes column not available."))
+    
+    award_keywords <- c(
+      "awarded", "award", "booked", "proceed", "loi",
+      "notice to proceed", "doing this project", "re-awarded",
+      "we are doing", "we will be doing", "we have been",
+      "going with us", "selected us"
+    )
+    
+    pattern <- paste(award_keywords, collapse = "|")
+    
+    df %>%
+      filter(!is.na(notes), notes != "") %>%
+      filter(grepl(pattern, tolower(notes))) %>%
+      arrange(desc(follow_up_date)) %>%
+      mutate(
+        Date       = format(follow_up_date, "%b %d, %Y"),
+        Estimator  = estimator,
+        Contractor = contractor,
+        # Truncate long notes for display
+        Note       = ifelse(nchar(notes) > 200,
+                            paste0(substr(notes, 1, 200), "..."),
+                            notes)
+      ) %>%
+      select(Date, Estimator, Contractor, Note) %>%
+      datatable(
+        options = list(
+          pageLength = 8,
+          scrollX    = TRUE,
+          dom        = "ftp",
+          order      = list(list(0, "desc"))
+        ),
+        rownames = FALSE
+      )
+  })
 }
