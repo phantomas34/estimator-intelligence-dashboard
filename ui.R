@@ -457,6 +457,26 @@ dashboardPage(
                 )
               ),
               
+              fluidRow(
+                box(
+                  title       = "Award Signal Distribution by Estimator \u2014 NLP Scored",
+                  status      = "success",
+                  solidHeader = TRUE,
+                  width       = 12,
+                  fluidRow(
+                    column(12,
+                           p(style = "font-size:12px; color:#5A6A72; margin-bottom:6px;",
+                             icon("robot"), " ",
+                             "Each note scored by a Logistic Regression model trained on ",
+                             tags$b("2,454 follow-up records"), ". Colors indicate award signal confidence. ",
+                             "Run ", tags$code("nlp_followup_scorer.py"), " to refresh scores."
+                           )
+                    )
+                  ),
+                  plotlyOutput("ci_nlp_dist", height = "280px")
+                )
+              ), 
+              
               # ── ROW 3: TOP CONTRACTORS + ACTIVITY TIMELINE ─────────────────────────────
               fluidRow(
                 box(

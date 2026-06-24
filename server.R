@@ -1604,42 +1604,169 @@ function(input, output, session) {
   
   # ── AWARD SIGNAL FEED ─────────────────────────────────────────────────────────
   
-  output$ci_award_feed <- renderDataTable({
-    df <- ci_filtered()
-    validate(need(nrow(df) > 0, "No follow-up data for selected filters."))
-    validate(need("notes" %in% names(df), "Notes column not available."))
+  # ── NLP SCORES DATA ───────────────────────────────────────────────────────────
+  
+  get_nlp_scores <- reactive({
+    input$refresh
     
-    award_keywords <- c(
-      "awarded", "award", "booked", "proceed", "loi",
-      "notice to proceed", "doing this project", "re-awarded",
-      "we are doing", "we will be doing", "we have been",
-      "going with us", "selected us"
+    if (!dbExistsTable(db_pool, "follow_up_scores")) return(data.frame())
+    
+    dbGetQuery(db_pool, "
+    SELECT
+      id,
+      follow_up_date,
+      estimator,
+      contractor,
+      notes,
+      rule_score,
+      award_probability,
+      signal_tier,
+      scored_at
+    FROM follow_up_scores
+    ORDER BY award_probability DESC, follow_up_date DESC
+  ")
+  })
+  
+  
+  # ── NLP KPI — override ci_kpi_top_est with award signal count ────────────────
+  # Add this additional KPI box to the UI row or repurpose an existing one.
+  # This is a supplementary output — wire to a new valueBoxOutput("ci_kpi_signals")
+  
+  output$ci_kpi_signals <- renderValueBox({
+    df <- get_nlp_scores()
+    n  <- nrow(df[df$award_probability >= 0.75, ])
+    valueBox(
+      comma(n),
+      "High-Confidence Award Signals",
+      icon  = icon("trophy"),
+      color = "green"
     )
+  })
+  
+  
+  # ── NLP-POWERED AWARD SIGNAL FEED ─────────────────────────────────────────────
+  
+  output$ci_award_feed <- renderDataTable({
+    df        <- get_nlp_scores()
+    df_filter <- ci_filtered()   # reuse existing estimator/date/contractor filters
     
-    pattern <- paste(award_keywords, collapse = "|")
+    validate(need(nrow(df) > 0, "NLP scores not found. Run nlp_followup_scorer.py first."))
     
+    # Apply same filters as the rest of the tab
+    if (!is.null(input$ci_estimator) && length(input$ci_estimator) > 0)
+      df <- df %>% filter(estimator %in% input$ci_estimator)
+    
+    if (!is.null(input$ci_date_range)) {
+      df <- df %>%
+        filter(as.Date(follow_up_date) >= input$ci_date_range[1],
+               as.Date(follow_up_date) <= input$ci_date_range[2])
+    }
+    
+    if (!is.null(input$ci_contractor) && length(input$ci_contractor) > 0)
+      df <- df %>% filter(contractor %in% input$ci_contractor)
+    
+    # Keep only meaningful signals
+    df <- df %>% filter(award_probability >= 0.50)
+    
+    validate(need(nrow(df) > 0, "No award signals for selected filters."))
+    
+    # Format for display
     df %>%
-      filter(!is.na(notes), notes != "") %>%
-      filter(grepl(pattern, tolower(notes))) %>%
-      arrange(desc(follow_up_date)) %>%
+      arrange(desc(award_probability), desc(follow_up_date)) %>%
       mutate(
-        Date       = format(follow_up_date, "%b %d, %Y"),
-        Estimator  = estimator,
-        Contractor = contractor,
-        # Truncate long notes for display
-        Note       = ifelse(nchar(notes) > 200,
-                            paste0(substr(notes, 1, 200), "..."),
-                            notes)
+        Date        = format(as.Date(follow_up_date), "%b %d, %Y"),
+        Estimator   = estimator,
+        Contractor  = contractor,
+        Score       = paste0(round(award_probability * 100), "%"),
+        Tier        = signal_tier,
+        Note        = ifelse(
+          nchar(notes) > 220,
+          paste0(substr(notes, 1, 220), "…"),
+          notes
+        )
       ) %>%
-      select(Date, Estimator, Contractor, Note) %>%
+      select(Date, Estimator, Contractor, Score, Tier, Note) %>%
       datatable(
         options = list(
           pageLength = 8,
           scrollX    = TRUE,
           dom        = "ftp",
-          order      = list(list(0, "desc"))
+          order      = list(list(3, "desc")),   # sort by Score desc
+          columnDefs = list(
+            list(width = "60px",  targets = 0),   # Date
+            list(width = "90px",  targets = 1),   # Estimator
+            list(width = "120px", targets = 2),   # Contractor
+            list(width = "50px",  targets = 3),   # Score
+            list(width = "110px", targets = 4),   # Tier
+            list(width = "auto",  targets = 5)    # Note
+          )
         ),
         rownames = FALSE
+      ) %>%
+      formatStyle(
+        "Tier",
+        backgroundColor = styleEqual(
+          c("Strong Award Signal", "Likely Award", "Mild Positive", "Neutral / Pending"),
+          c("#d4efdf",             "#d6eaf8",      "#fef9e7",       "#f2f3f4")
+        ),
+        fontWeight = styleEqual(
+          c("Strong Award Signal"),
+          c("bold")
+        )
       )
   })
+  
+  
+  # ── NLP SCORE DISTRIBUTION CHART (optional addition to UI) ───────────────────
+  # Shows the distribution of award probabilities across all notes.
+  
+  output$ci_nlp_dist <- renderPlotly({
+    df <- get_nlp_scores()
+    validate(need(nrow(df) > 0, "No NLP scores available."))
+    
+    # Apply ALL filters — estimator, date, contractor
+    if (!is.null(input$ci_estimator) && length(input$ci_estimator) > 0)
+      df <- df %>% filter(estimator %in% input$ci_estimator)
+    
+    if (!is.null(input$ci_date_range))
+      df <- df %>%
+      filter(as.Date(follow_up_date) >= input$ci_date_range[1],
+             as.Date(follow_up_date) <= input$ci_date_range[2])
+    
+    if (!is.null(input$ci_contractor) && length(input$ci_contractor) > 0)
+      df <- df %>% filter(contractor %in% input$ci_contractor)
+    
+    tier_colors <- c(
+      "Strong Award Signal" = "#1e8449",
+      "Likely Award"        = "#2e86c1",
+      "Mild Positive"       = "#d4ac0d",
+      "Neutral / Pending"   = "#808b96"
+    )
+    
+    agg <- df %>%
+      count(signal_tier, estimator) %>%
+      mutate(signal_tier = factor(signal_tier,
+                                  levels = c("Strong Award Signal", "Likely Award",
+                                             "Mild Positive", "Neutral / Pending")))
+    
+    p <- ggplot(agg, aes(
+      x    = estimator,
+      y    = n,
+      fill = signal_tier,
+      text = paste0("<b>", estimator, "</b><br>",
+                    signal_tier, ": ", n, " notes")
+    )) +
+      geom_col(position = "stack", width = 0.65) +
+      scale_fill_manual(values = tier_colors, name = "Signal Tier") +
+      labs(x = "", y = "Note Count") +
+      theme_minimal() +
+      theme(
+        axis.text.x  = element_text(angle = 35, hjust = 1, size = 9),
+        legend.position = "bottom",
+        legend.title = element_text(size = 9)
+      )
+    
+    ggplotly(p, tooltip = "text")
+  })
+  
 }
