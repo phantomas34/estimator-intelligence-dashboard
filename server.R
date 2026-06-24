@@ -88,6 +88,181 @@ function(input, output, session) {
     result
   })
   
+  ceo_scorecard <- reactive({
+    d <- filtered_data()
+    validate(need(nrow(d) > 0, "No data in selected range."))
+    
+    monthly <- d %>%
+      mutate(period = floor_date(report_date, "month")) %>%
+      group_by(primary_name, period) %>%
+      summarise(
+        amt_bid = sum(amt_bid, na.rm = TRUE),
+        amt_booked = sum(amt_booked, na.rm = TRUE),
+        qty_bid = sum(qty_bid, na.rm = TRUE),
+        qty_booked = sum(qty_booked, na.rm = TRUE),
+        .groups = "drop"
+      )
+    
+    base <- monthly %>%
+      group_by(primary_name) %>%
+      summarise(
+        total_bid = sum(amt_bid, na.rm = TRUE),
+        total_booked = sum(amt_booked, na.rm = TRUE),
+        jobs_bid = sum(qty_bid, na.rm = TRUE),
+        jobs_won = sum(qty_booked, na.rm = TRUE),
+        same_month_win_rate = ifelse(total_bid > 0, total_booked / total_bid, NA_real_),
+        avg_job_size = ifelse(jobs_bid > 0, total_bid / jobs_bid, NA_real_),
+        months_active = n(),
+        booked_cv = ifelse(mean(amt_booked, na.rm = TRUE) > 0,
+                           sd(amt_booked, na.rm = TRUE) / mean(amt_booked, na.rm = TRUE), NA_real_),
+        .groups = "drop"
+      )
+    
+    lwr <- lag_win_rate()
+    if (!is.null(lwr) && nrow(lwr) > 0) {
+      lag_summary <- lwr %>%
+        group_by(primary_name) %>%
+        summarise(lag_win_rate = sum(lag_booked_amt, na.rm = TRUE) / sum(amt_bid, na.rm = TRUE), .groups = "drop")
+      base <- base %>%
+        left_join(lag_summary, by = "primary_name") %>%
+        mutate(win_rate_used = coalesce(lag_win_rate, same_month_win_rate))
+    } else {
+      base <- base %>% mutate(lag_win_rate = NA_real_, win_rate_used = same_month_win_rate)
+    }
+    
+    safe_rescale <- function(x) {
+      if (all(is.na(x))) return(rep(0.5, length(x)))
+      rng <- range(x, na.rm = TRUE)
+      if (isTRUE(all.equal(rng[1], rng[2]))) return(rep(0.5, length(x)))
+      (x - rng[1]) / (rng[2] - rng[1])
+    }
+    
+    w_raw <- c(
+      win = input$ceo_w_win %||% 35,
+      eff = input$ceo_w_eff %||% 20,
+      stab = input$ceo_w_stab %||% 20,
+      out = input$ceo_w_out %||% 25
+    )
+    w_sum <- sum(w_raw, na.rm = TRUE)
+    if (is.na(w_sum) || w_sum <= 0) {
+      w <- c(win = 0.35, eff = 0.20, stab = 0.20, out = 0.25)
+    } else {
+      w <- w_raw / w_sum
+    }
+    
+    risk_win_cut <- (input$ceo_risk_win %||% 12) / 100
+    risk_cv_cut <- input$ceo_risk_cv %||% 1.25
+    
+    base %>%
+      mutate(
+        s_win = safe_rescale(win_rate_used),
+        s_efficiency = safe_rescale(ifelse(total_bid > 0, total_booked / total_bid, NA_real_)),
+        s_stability = 1 - safe_rescale(booked_cv),
+        s_output = safe_rescale(total_booked),
+        composite_score = 100 * (w["win"] * s_win + w["eff"] * s_efficiency + w["stab"] * s_stability + w["out"] * s_output),
+        risk_flag = case_when(
+          is.na(win_rate_used) ~ "Watch",
+          win_rate_used < risk_win_cut | booked_cv > risk_cv_cut ~ "At Risk",
+          win_rate_used < (risk_win_cut + 0.06) | booked_cv > (risk_cv_cut * 0.8) ~ "Watch",
+          TRUE ~ "Healthy"
+        )
+      ) %>%
+      arrange(desc(composite_score))
+  })
+  
+  ceo_forecast <- reactive({
+    d <- filtered_data()
+    validate(need(nrow(d) > 0, "No data in selected range."))
+    
+    monthly <- d %>%
+      mutate(period = floor_date(report_date, "month")) %>%
+      group_by(primary_name, period) %>%
+      summarise(
+        amt_bid = sum(amt_bid, na.rm = TRUE),
+        amt_booked = sum(amt_booked, na.rm = TRUE),
+        .groups = "drop"
+      )
+    
+    estimators <- sort(unique(monthly$primary_name))
+    out <- vector("list", length(estimators))
+    
+    for (i in seq_along(estimators)) {
+      est <- estimators[i]
+      e <- monthly %>% filter(primary_name == est) %>% arrange(period)
+      if (nrow(e) < 10) next
+      
+      e <- e %>%
+        mutate(
+          t = row_number(),
+          month_num = month(period),
+          lag_booked = lag(amt_booked, 1),
+          lag_bid = lag(amt_bid, 1)
+        ) %>%
+        drop_na(lag_booked, lag_bid)
+      
+      if (nrow(e) < 8) next
+      
+      fit <- tryCatch(
+        lm(log1p(amt_booked) ~ log1p(amt_bid) + log1p(lag_booked) + month_num + t, data = e),
+        error = function(err) NULL
+      )
+      if (is.null(fit)) next
+      
+      fit_resid <- residuals(fit)
+      resid_sd <- sd(fit_resid, na.rm = TRUE)
+      if (is.na(resid_sd) || resid_sd == 0) resid_sd <- 0.10
+      
+      hist <- monthly %>% filter(primary_name == est) %>% arrange(period)
+      next_periods <- seq(max(hist$period) %m+% months(1), by = "month", length.out = 3)
+      
+      last_booked <- tail(hist$amt_booked, 1)
+      last_bid <- tail(hist$amt_bid, 1)
+      avg_recent_bid <- mean(tail(hist$amt_bid, 3), na.rm = TRUE)
+      if (is.na(avg_recent_bid) || avg_recent_bid <= 0) avg_recent_bid <- max(last_bid, 1, na.rm = TRUE)
+      if (is.na(last_booked)) last_booked <- 0
+      if (is.na(last_bid)) last_bid <- avg_recent_bid
+      
+      pred_rows <- vector("list", length(next_periods))
+      current_t <- max(e$t, na.rm = TRUE)
+      current_lag_booked <- tail(hist$amt_booked, 1)
+      current_lag_bid <- tail(hist$amt_bid, 1)
+      if (is.na(current_lag_booked)) current_lag_booked <- 0
+      if (is.na(current_lag_bid) || current_lag_bid <= 0) current_lag_bid <- avg_recent_bid
+      
+      for (j in seq_along(next_periods)) {
+        prd <- next_periods[j]
+        current_t <- current_t + 1
+        new_x <- tibble(
+          amt_bid = avg_recent_bid,
+          lag_booked = current_lag_booked,
+          lag_bid = current_lag_bid,
+          month_num = month(prd),
+          t = current_t
+        )
+        pred_log <- as.numeric(predict(fit, newdata = new_x))
+        pred_amt <- pmax(0, expm1(pred_log))
+        lo <- pmax(0, expm1(pred_log - 1.28 * resid_sd))
+        hi <- pmax(0, expm1(pred_log + 1.28 * resid_sd))
+        
+        pred_rows[[j]] <- tibble(
+          primary_name = est,
+          period = prd,
+          predicted_booked = pred_amt,
+          lo80 = lo,
+          hi80 = hi,
+          model_mae = mean(abs(expm1(fitted(fit)) - e$amt_booked), na.rm = TRUE)
+        )
+        
+        current_lag_booked <- pred_amt
+        current_lag_bid <- avg_recent_bid
+      }
+      
+      out[[i]] <- bind_rows(pred_rows)
+    }
+    
+    bind_rows(out)
+  })
+  
   # ── MAIN DROPDOWN UPDATERS ────────────────────────────────────────────────
   
   observe({
@@ -99,9 +274,6 @@ function(input, output, session) {
     updatePickerInput(session, "estimatorSelect", choices = est_list, selected = isolate(input$estimatorSelect))
     
     # ── BUG FIX 1: its_estimator auto-selection ───────────────────────────
-    # pickerInput returns character(0) (NOT NULL) when empty, so !is.null() always
-    # passed and selected = character(0) was being sent, leaving nothing pre-selected.
-    # Now we check length() > 0 AND that the current value is still a valid choice.
     eligible <- df %>%
       group_by(primary_name) %>%
       summarise(n = n(), .groups = "drop") %>%
@@ -109,7 +281,7 @@ function(input, output, session) {
       pull(primary_name) %>%
       sort()
     
-    cur_its     <- isolate(input$its_estimator)
+    cur_its      <- isolate(input$its_estimator)
     selected_its <- if (length(cur_its) > 0 && cur_its %in% eligible) cur_its else eligible[1]
     updatePickerInput(session, "its_estimator", choices = eligible, selected = selected_its)
     # ── END BUG FIX 1 ────────────────────────────────────────────────────
@@ -345,9 +517,6 @@ function(input, output, session) {
   observeEvent(input$its_run, {
     
     # ── BUG FIX 2: tryCatch around its_series() call ──────────────────────
-    # req() inside its_series throws a silent condition that previously
-    # propagated here and caused the entire observeEvent to abort with zero
-    # user feedback. Now we catch that and display a helpful message instead.
     series <- tryCatch(its_series(), error = function(e) NULL)
     if (is.null(series)) {
       its_result(list(error = "Please select an estimator from the dropdown, then click Run Analysis."))
@@ -375,10 +544,6 @@ function(input, output, session) {
           bp_dates <- series$date_group[bp_idx]
           
           # ── BUG FIX 3: Fstats time-series subscripting ──────────────────
-          # Fstats() returns a TRIMMED time series. bp_idx is a row position
-          # in series (e.g. 20), but fs$Fstats[20] returns the 20th element
-          # of the trimmed ts — not the stat at row 20. We now use time()
-          # to map bp_idx values onto the correct ts positions.
           fs       <- Fstats(value ~ t, data = series)
           fs_times <- as.integer(time(fs$Fstats))
           fs_vals  <- as.numeric(fs$Fstats)
@@ -419,11 +584,6 @@ function(input, output, session) {
     
     cf <- coeftest(fit)
     
-    # Build cf_df by indexing the coeftest matrix directly by column name.
-    # as.data.frame(cf) is unreliable — R mangles column names like
-    # "Std. Error" → "Std..Error" and "Pr(>|t|)" → "Pr...t.." depending
-    # on R/lmtest version, causing downstream mutate() to crash with
-    # "object 'Estimate' not found".
     cf_df <- data.frame(
       Term        = recode(rownames(cf),
                            `(Intercept)` = "Intercept (baseline level)",
@@ -672,7 +832,7 @@ function(input, output, session) {
       km       <- kmeans(feats, centers = k, nstart = 25)
       ds_df$Cluster <- as.factor(km$cluster)
       cl_means <- ds_df %>% group_by(Cluster) %>% summarise(mean_wr = mean(Win_Rate, na.rm = TRUE), .groups = "drop") %>% arrange(desc(mean_wr))
-      arch_map <- setNames(c("High-Efficiency", "Selective", "High-Volume")[seq_len(nrow(cl_means))], cl_means$Cluster)
+      arch_map <- setNames(c("High-Efficiency", "Selective", "New/Developing")[seq_len(nrow(cl_means))], cl_means$Cluster)
       ds_df$Archetype <- arch_map[as.character(ds_df$Cluster)]
     }
     
@@ -690,6 +850,169 @@ function(input, output, session) {
       labs(x = "Total Amount Bid", y = "Win Rate", color = "Archetype") +
       theme_minimal() + theme(legend.position = "right")
     ggplotly(p, tooltip = "text")
+  })
+  
+  # ── ESTIMATOR SCATTER ─────────────────────────────────────────────────────
+  
+  # Aggregate filtered_data() per estimator — no separate DB query needed.
+  # Inherits the sidebar date range and estimator picker automatically.
+  scatter_agg <- reactive({
+    d   <- filtered_data()
+    lwr <- lag_win_rate()
+    validate(need(nrow(d) > 0, "No data in selected range."))
+    
+    agg <- d %>%
+      group_by(primary_name) %>%
+      summarise(
+        total_amt_bid    = sum(amt_bid,    na.rm = TRUE),
+        total_amt_booked = sum(amt_booked, na.rm = TRUE),
+        total_qty_bid    = sum(qty_bid,    na.rm = TRUE),
+        total_qty_booked = sum(qty_booked, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      filter(total_qty_bid >= 3) %>%  # exclude trivial sample sizes
+      mutate(
+        win_rate_sm     = ifelse(total_amt_bid    > 0, total_amt_booked / total_amt_bid,    NA_real_),
+        avg_bid_size    = ifelse(total_qty_bid    > 0, total_amt_bid    / total_qty_bid,    NA_real_),
+        avg_booked_size = ifelse(total_qty_booked > 0, total_amt_booked / total_qty_booked, NA_real_)
+      )
+    
+    # Prefer lag-adjusted win rate when available (mirrors K-Means behaviour)
+    if (!is.null(lwr) && nrow(lwr) > 0) {
+      lag_summary <- lwr %>%
+        group_by(primary_name) %>%
+        summarise(win_rate_lag = sum(lag_booked_amt, na.rm = TRUE) / sum(amt_bid, na.rm = TRUE),
+                  .groups = "drop")
+      agg <- agg %>%
+        left_join(lag_summary, by = "primary_name") %>%
+        mutate(win_rate = coalesce(win_rate_lag, win_rate_sm)) %>%
+        select(-win_rate_lag, -win_rate_sm)
+    } else {
+      agg <- agg %>% rename(win_rate = win_rate_sm)
+    }
+    
+    agg %>% filter(!is.na(win_rate), !is.infinite(win_rate),
+                   !is.na(avg_bid_size), !is.infinite(avg_bid_size))
+  })
+  
+  output$scatter_plot <- renderPlotly({
+    df <- scatter_agg()
+    validate(need(nrow(df) > 0, "No estimators meet the minimum bid threshold for the selected period."))
+    
+    # ── Axis / size column resolution ────────────────────────────────────
+    x_col    <- input$scatter_x
+    y_col    <- input$scatter_y
+    size_col <- input$scatter_size
+    
+    axis_labels <- c(
+      avg_bid_size      = "Avg Bid Size ($)",
+      total_amt_bid     = "Total Bid Volume ($)",
+      total_qty_bid     = "Bid Count",
+      win_rate          = "Win Rate (%)",
+      avg_booked_size   = "Avg Booked Size ($)",
+      total_amt_booked  = "Total Booked Volume ($)"
+    )
+    
+    x_vals    <- df[[x_col]]
+    y_vals    <- df[[y_col]]
+    size_vals <- df[[size_col]]
+    
+    # Guard: if avg_booked_size is all NA (no bookings in period), fall back gracefully
+    validate(need(!all(is.na(y_vals)),  paste0("No data available for Y axis: ", axis_labels[y_col])))
+    validate(need(!all(is.na(size_vals)), paste0("No data available for size: ",  axis_labels[size_col])))
+    
+    # Normalise bubble size to a sensible pixel range (10–55px)
+    size_norm <- scales::rescale(replace_na(size_vals, 0), to = c(10, 55))
+    
+    # ── Hover text ───────────────────────────────────────────────────────
+    fmt_val <- function(vals, col_id) {
+      lbl <- axis_labels[col_id]
+      if (grepl("\\$", lbl))         dollar(vals, accuracy = 1)
+      else if (col_id == "win_rate") paste0(round(vals * 100, 1), "%")
+      else                           comma(vals, accuracy = 1)
+    }
+    
+    hover_text <- paste0(
+      "<b>", df$primary_name, "</b><br>",
+      axis_labels[x_col],    ": ", fmt_val(x_vals,    x_col),    "<br>",
+      axis_labels[y_col],    ": ", fmt_val(y_vals,    y_col),    "<br>",
+      axis_labels[size_col], " (bubble): ", fmt_val(size_vals, size_col), "<br>",
+      "Bids submitted: ", comma(df$total_qty_bid,    accuracy = 1), "<br>",
+      "Bids won: ",       comma(df$total_qty_booked, accuracy = 1)
+    )
+    
+    # ── AdminLTE-matching palette — one colour per estimator ─────────────
+    palette_hex <- c("#3c8dbc", "#00a65a", "#f39c12", "#dd4b39",
+                     "#605ca8", "#d81b60", "#00c0ef", "#39cccc",
+                     "#ff851b", "#b0bec5")
+    dot_colors  <- palette_hex[(seq_len(nrow(df)) - 1L) %% length(palette_hex) + 1L]
+    
+    # ── Y-axis tick format ───────────────────────────────────────────────
+    y_tickformat <- if (y_col == "win_rate")                            ".1%"
+    else if (grepl("\\$", axis_labels[y_col]))          "$,.0f"
+    else                                                ""
+    x_tickformat <- if (grepl("\\$", axis_labels[x_col]))              "$,.0f"
+    else                                                ""
+    
+    # ── Build plotly ─────────────────────────────────────────────────────
+    plot_ly(
+      data      = df,
+      x         = ~x_vals,
+      y         = ~y_vals,
+      text      = ~hover_text,
+      hoverinfo = "text",
+      type      = "scatter",
+      mode      = "markers+text",
+      marker    = list(
+        size    = size_norm,
+        color   = dot_colors,
+        opacity = 0.85,
+        line    = list(color = "rgba(255,255,255,0.3)", width = 1.2)
+      ),
+      texttemplate = "%{text}",    # plotly ignores this for hoverinfo="text"; set separately
+      showlegend   = FALSE
+    ) %>%
+      # Estimator name labels floating above each bubble
+      add_text(
+        x            = ~x_vals,
+        y            = ~y_vals,
+        text         = ~primary_name,
+        textposition = "top center",
+        textfont     = list(size = 10, color = "#444444"),
+        hoverinfo    = "none",
+        showlegend   = FALSE
+      ) %>%
+      layout(
+        paper_bgcolor = "rgba(0,0,0,0)",
+        plot_bgcolor  = "rgba(0,0,0,0)",
+        font  = list(color = "#2c3e50", family = "Source Sans Pro, sans-serif"),
+        xaxis = list(
+          title         = axis_labels[x_col],
+          gridcolor     = "rgba(0,0,0,0.06)",
+          zerolinecolor = "rgba(0,0,0,0.15)",
+          tickformat    = x_tickformat,
+          titlefont     = list(size = 12, color = "#2c3e50")
+        ),
+        yaxis = list(
+          title         = axis_labels[y_col],
+          gridcolor     = "rgba(0,0,0,0.06)",
+          zerolinecolor = "rgba(0,0,0,0.15)",
+          tickformat    = y_tickformat,
+          titlefont     = list(size = 12, color = "#2c3e50")
+        ),
+        showlegend = FALSE,
+        margin     = list(t = 30, r = 20, b = 60, l = 80),
+        hoverlabel = list(
+          bgcolor     = "#2c3e50",
+          bordercolor = "#3c8dbc",
+          font        = list(color = "#ffffff", size = 12)
+        )
+      ) %>%
+      config(
+        displayModeBar           = TRUE,
+        modeBarButtonsToRemove   = c("lasso2d", "select2d", "autoScale2d"),
+        displaylogo              = FALSE
+      )
   })
   
   # ── ANNUAL, YOY, QUARTERLY ────────────────────────────────────────────────
@@ -824,6 +1147,276 @@ function(input, output, session) {
     
     datatable(lb, options = list(pageLength = 15, scrollX = TRUE, order = list(list(2, "desc"))), rownames = FALSE)
   })
+  
+  output$ceo_total_pred_90d <- renderValueBox({
+    f <- ceo_forecast()
+    total_pred <- sum(f$predicted_booked, na.rm = TRUE)
+    valueBox(
+      value = dollar(total_pred, accuracy = 1),
+      subtitle = "Forecasted Bookings (Next 90 Days)",
+      icon = icon("chart-line"),
+      color = "blue"
+    )
+  })
+  
+  output$ceo_top_estimator <- renderValueBox({
+    f <- ceo_forecast()
+    top <- f %>%
+      group_by(primary_name) %>%
+      summarise(pred_90d = sum(predicted_booked, na.rm = TRUE), .groups = "drop") %>%
+      arrange(desc(pred_90d)) %>%
+      slice(1)
+    validate(need(nrow(top) > 0, "No forecast available yet."))
+    valueBox(
+      value = top$primary_name[[1]],
+      subtitle = paste0("Top Expected Contributor (", dollar(top$pred_90d[[1]], accuracy = 1), ")"),
+      icon = icon("trophy"),
+      color = "green"
+    )
+  })
+  
+  output$ceo_at_risk_count <- renderValueBox({
+    sc <- ceo_scorecard()
+    n_risk <- sum(sc$risk_flag == "At Risk", na.rm = TRUE)
+    valueBox(
+      value = n_risk,
+      subtitle = "Estimators Flagged At Risk",
+      icon = icon("triangle-exclamation"),
+      color = ifelse(n_risk > 0, "red", "olive")
+    )
+  })
+  
+  output$ceo_model_quality <- renderValueBox({
+    f <- ceo_forecast()
+    mae <- mean(f$model_mae, na.rm = TRUE)
+    if (is.na(mae)) mae <- 0
+    valueBox(
+      value = dollar(mae, accuracy = 1),
+      subtitle = "Average Forecast MAE (In-Sample)",
+      icon = icon("ruler"),
+      color = "purple"
+    )
+  })
+  
+  output$ceo_forecast_plot <- renderPlotly({
+    f <- ceo_forecast()
+    validate(need(nrow(f) > 0, "Insufficient history to forecast."))
+    
+    p <- f %>%
+      group_by(primary_name) %>%
+      summarise(
+        pred_90d = sum(predicted_booked, na.rm = TRUE),
+        lo80 = sum(lo80, na.rm = TRUE),
+        hi80 = sum(hi80, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      arrange(desc(pred_90d)) %>%
+      mutate(primary_name = fct_reorder(primary_name, pred_90d)) %>%
+      ggplot(aes(x = primary_name, y = pred_90d,
+                 text = paste0(
+                   "<b>", primary_name, "</b><br>",
+                   "Predicted 90D: ", dollar(pred_90d, accuracy = 1), "<br>",
+                   "80% band: ", dollar(lo80, accuracy = 1), " - ", dollar(hi80, accuracy = 1)
+                 ))) +
+      geom_col(fill = "#3c8dbc", width = 0.65) +
+      geom_errorbar(aes(ymin = lo80, ymax = hi80), width = 0.2, color = "#2c3e50") +
+      coord_flip() +
+      scale_y_continuous(labels = dollar_format(accuracy = 1)) +
+      labs(x = "", y = "Predicted Booked Revenue ($)") +
+      theme_minimal()
+    
+    ggplotly(p, tooltip = "text")
+  })
+  
+  output$ceo_action_summary <- renderUI({
+    sc <- ceo_scorecard()
+    f <- ceo_forecast()
+    validate(need(nrow(sc) > 0, "No scorecard data."))
+    
+    top_strength <- sc %>% arrange(desc(composite_score)) %>% slice(1)
+    top_risk <- sc %>% filter(risk_flag == "At Risk") %>% arrange(composite_score) %>% slice(1)
+    
+    f_rollup <- f %>%
+      group_by(primary_name) %>%
+      summarise(pred_90d = sum(predicted_booked, na.rm = TRUE), .groups = "drop")
+    upside <- f_rollup %>% arrange(desc(pred_90d)) %>% slice(1)
+    
+    tagList(
+      tags$p(tags$b("Top performer:"), paste0(" ", top_strength$primary_name[[1]], " (score ", round(top_strength$composite_score[[1]], 1), ").")),
+      tags$p(tags$b("Highest upside:"), paste0(" ", upside$primary_name[[1]], " with projected ", dollar(upside$pred_90d[[1]], accuracy = 1), " in next 90 days.")),
+      if (nrow(top_risk) > 0) {
+        tags$p(tags$b("Immediate coaching target:"), paste0(" ", top_risk$primary_name[[1]], " (low conversion or unstable output)."))
+      } else {
+        tags$p(tags$b("Risk status:"), " No estimator currently flagged as high risk.")
+      }
+    )
+  })
+  
+  output$ceo_scorecard_table <- renderDataTable({
+    sc <- ceo_scorecard()
+    f <- ceo_forecast() %>%
+      group_by(primary_name) %>%
+      summarise(pred_90d = sum(predicted_booked, na.rm = TRUE), .groups = "drop")
+    
+    view <- sc %>%
+      left_join(f, by = "primary_name") %>%
+      mutate(
+        pred_90d = replace_na(pred_90d, 0),
+        win_rate_used = percent(win_rate_used, accuracy = 0.1),
+        same_month_win_rate = percent(same_month_win_rate, accuracy = 0.1),
+        lag_win_rate = ifelse(is.na(lag_win_rate), "N/A", percent(lag_win_rate, accuracy = 0.1)),
+        total_bid = dollar(total_bid, accuracy = 1),
+        total_booked = dollar(total_booked, accuracy = 1),
+        avg_job_size = dollar(avg_job_size, accuracy = 1),
+        pred_90d = dollar(pred_90d, accuracy = 1),
+        composite_score = round(composite_score, 1)
+      ) %>%
+      transmute(
+        Estimator = primary_name,
+        `Score (0-100)` = composite_score,
+        `Risk` = risk_flag,
+        `Win % (Used)` = win_rate_used,
+        `Win % (Same-Mo)` = same_month_win_rate,
+        `Win % (Lag-Adj)` = lag_win_rate,
+        `Booked Forecast 90D` = pred_90d,
+        `Total Booked` = total_booked,
+        `Total Bid` = total_bid,
+        `Avg Job Size` = avg_job_size,
+        `Months Active` = months_active
+      )
+    
+    datatable(
+      view,
+      options = list(pageLength = 15, scrollX = TRUE, order = list(list(1, "desc"))),
+      rownames = FALSE
+    )
+  })
+  
+  output$download_top_brief <- downloadHandler(
+    filename = function() { paste0("Top_Brief_", format(Sys.Date(), "%Y-%m-%d"), ".xlsx") },
+    content = function(file) {
+      sc <- ceo_scorecard()
+      fc <- ceo_forecast()
+      req(nrow(sc) > 0)
+      
+      withProgress(message = "Building Top Brief export...", value = 0.2, {
+        wb <- createWorkbook()
+        header_style <- createStyle(fontName = "Calibri", fontSize = 11, fontColour = "#FFFFFF", fgFill = "#2c3e50",
+                                    halign = "LEFT", valign = "CENTER", textDecoration = "bold",
+                                    border = "Bottom", borderColour = "#27ae60")
+        title_style <- createStyle(fontName = "Calibri", fontSize = 14, textDecoration = "bold", fontColour = "#2c3e50")
+        dollar_style <- createStyle(numFmt = "$#,##0")
+        pct_style <- createStyle(numFmt = "0.0%")
+        
+        fc_roll <- fc %>%
+          group_by(primary_name) %>%
+          summarise(
+            pred_90d = sum(predicted_booked, na.rm = TRUE),
+            lo80 = sum(lo80, na.rm = TRUE),
+            hi80 = sum(hi80, na.rm = TRUE),
+            model_mae = mean(model_mae, na.rm = TRUE),
+            .groups = "drop"
+          )
+        
+        top_strength <- sc %>% arrange(desc(composite_score)) %>% slice(1)
+        top_risk <- sc %>% filter(risk_flag == "At Risk") %>% arrange(composite_score) %>% slice(1)
+        top_upside <- fc_roll %>% arrange(desc(pred_90d)) %>% slice(1)
+        
+        addWorksheet(wb, "Top Brief Summary")
+        setColWidths(wb, "Top Brief Summary", cols = 1:3, widths = c(36, 26, 26))
+        writeData(wb, "Top Brief Summary", "Top Brief - Executive Summary", startRow = 1, startCol = 1)
+        addStyle(wb, "Top Brief Summary", title_style, rows = 1, cols = 1)
+        
+        total_pred <- sum(fc_roll$pred_90d, na.rm = TRUE)
+        at_risk_n <- sum(sc$risk_flag == "At Risk", na.rm = TRUE)
+        avg_mae <- mean(fc_roll$model_mae, na.rm = TRUE)
+        
+        kpi <- data.frame(
+          Metric = c("Forecasted Bookings (Next 90 Days)", "Top Expected Contributor", "Estimators Flagged At Risk", "Average Forecast MAE"),
+          Value = c(
+            dollar(total_pred, accuracy = 1),
+            if (nrow(top_upside) > 0) paste0(top_upside$primary_name[[1]], " (", dollar(top_upside$pred_90d[[1]], accuracy = 1), ")") else "N/A",
+            as.character(at_risk_n),
+            dollar(ifelse(is.na(avg_mae), 0, avg_mae), accuracy = 1)
+          ),
+          stringsAsFactors = FALSE
+        )
+        writeData(wb, "Top Brief Summary", kpi, startRow = 3, startCol = 1, colNames = TRUE)
+        addStyle(wb, "Top Brief Summary", header_style, rows = 3, cols = 1:2)
+        
+        action_lines <- data.frame(
+          `Action Summary` = c(
+            paste0("Top performer: ", top_strength$primary_name[[1]], " (score ", round(top_strength$composite_score[[1]], 1), ")."),
+            if (nrow(top_upside) > 0) paste0("Highest upside: ", top_upside$primary_name[[1]], " projected ", dollar(top_upside$pred_90d[[1]], accuracy = 1), " over next 90 days.") else "Highest upside: N/A",
+            if (nrow(top_risk) > 0) paste0("Immediate coaching target: ", top_risk$primary_name[[1]], ".") else "Risk status: no estimator currently flagged as high risk."
+          ),
+          stringsAsFactors = FALSE
+        )
+        writeData(wb, "Top Brief Summary", action_lines, startRow = 9, startCol = 1, colNames = TRUE)
+        addStyle(wb, "Top Brief Summary", header_style, rows = 9, cols = 1)
+        
+        config_df <- data.frame(
+          Parameter = c("Weight: Win Quality", "Weight: Efficiency", "Weight: Stability", "Weight: Output", "At-Risk Win % <", "At-Risk Volatility >"),
+          Value = c(
+            input$ceo_w_win %||% 35,
+            input$ceo_w_eff %||% 20,
+            input$ceo_w_stab %||% 20,
+            input$ceo_w_out %||% 25,
+            input$ceo_risk_win %||% 12,
+            input$ceo_risk_cv %||% 1.25
+          ),
+          stringsAsFactors = FALSE
+        )
+        writeData(wb, "Top Brief Summary", config_df, startRow = 14, startCol = 1, colNames = TRUE)
+        addStyle(wb, "Top Brief Summary", header_style, rows = 14, cols = 1:2)
+        
+        setProgress(0.6)
+        
+        addWorksheet(wb, "Scorecard")
+        setColWidths(wb, "Scorecard", cols = 1:12, widths = c(22, 12, 10, 12, 12, 12, 16, 14, 14, 14, 12, 12))
+        score_export <- sc %>%
+          left_join(fc_roll %>% select(primary_name, pred_90d), by = "primary_name") %>%
+          mutate(pred_90d = replace_na(pred_90d, 0)) %>%
+          transmute(
+            Estimator = primary_name,
+            `Score (0-100)` = round(composite_score, 1),
+            Risk = risk_flag,
+            `Win % (Used)` = win_rate_used,
+            `Win % (Same-Mo)` = same_month_win_rate,
+            `Win % (Lag-Adj)` = lag_win_rate,
+            `Booked Forecast 90D` = pred_90d,
+            `Total Booked` = total_booked,
+            `Total Bid` = total_bid,
+            `Avg Job Size` = avg_job_size,
+            `Months Active` = months_active,
+            `Booked CV` = booked_cv
+          ) %>%
+          arrange(desc(`Score (0-100)`))
+        writeData(wb, "Scorecard", score_export, startRow = 1, startCol = 1, colNames = TRUE)
+        addStyle(wb, "Scorecard", header_style, rows = 1, cols = 1:ncol(score_export))
+        addStyle(wb, "Scorecard", pct_style, rows = 2:(nrow(score_export) + 1), cols = c(4, 5, 6), gridExpand = TRUE)
+        addStyle(wb, "Scorecard", dollar_style, rows = 2:(nrow(score_export) + 1), cols = c(7, 8, 9, 10), gridExpand = TRUE)
+        
+        addWorksheet(wb, "Forecast Detail")
+        setColWidths(wb, "Forecast Detail", cols = 1:6, widths = c(22, 14, 14, 14, 14, 14))
+        fc_export <- fc %>%
+          arrange(primary_name, period) %>%
+          transmute(
+            Estimator = primary_name,
+            Month = format(period, "%b %Y"),
+            `Predicted Booked` = predicted_booked,
+            `Low 80%` = lo80,
+            `High 80%` = hi80,
+            `Model MAE` = model_mae
+          )
+        writeData(wb, "Forecast Detail", fc_export, startRow = 1, startCol = 1, colNames = TRUE)
+        addStyle(wb, "Forecast Detail", header_style, rows = 1, cols = 1:ncol(fc_export))
+        addStyle(wb, "Forecast Detail", dollar_style, rows = 2:(nrow(fc_export) + 1), cols = 3:6, gridExpand = TRUE)
+        
+        saveWorkbook(wb, file, overwrite = TRUE)
+      })
+    }
+  )
   
   output$db_status_text <- renderText({ paste("Database records loaded:", comma(nrow(get_data()))) })
   

@@ -10,8 +10,10 @@ dashboardPage(
   dashboardSidebar(
     width = 260,
     sidebarMenu(
-      menuItem("Executive Dashboard",  tabName = "dashboard", icon = icon("chart-area")),
+      menuItem("Top Brief",           tabName = "ceo_brief", icon = icon("briefcase")),
+      menuItem("Executive Dashboard",   tabName = "dashboard", icon = icon("chart-area")),
       menuItem("Intervention Analysis", tabName = "its",       icon = icon("flask")),
+      menuItem("Estimator Scatter",     tabName = "scatter",   icon = icon("circle-dot")),
       menuItem("Data Management",       tabName = "admin",     icon = icon("database")),
       hr(),
       div(style = "padding:10px;",
@@ -80,6 +82,59 @@ dashboardPage(
     "))),
     
     tabItems(
+      
+      # ── CEO BRIEF ────────────────────────────────────────────────────────
+      tabItem(tabName = "ceo_brief",
+              fluidRow(
+                box(title = "Top Brief Calibration & Export",
+                    status = "primary", solidHeader = TRUE, width = 12,
+                    fluidRow(
+                      column(2, sliderInput("ceo_w_win", "Weight: Win Quality", min = 0, max = 100, value = 35, step = 1)),
+                      column(2, sliderInput("ceo_w_eff", "Weight: Efficiency", min = 0, max = 100, value = 20, step = 1)),
+                      column(2, sliderInput("ceo_w_stab", "Weight: Stability", min = 0, max = 100, value = 20, step = 1)),
+                      column(2, sliderInput("ceo_w_out", "Weight: Output", min = 0, max = 100, value = 25, step = 1)),
+                      column(2, numericInput("ceo_risk_win", "At-Risk Win % <", value = 12, min = 1, max = 100, step = 1)),
+                      column(2, numericInput("ceo_risk_cv", "At-Risk Volatility >", value = 1.25, min = 0.1, max = 3, step = 0.05))
+                    ),
+                    fluidRow(
+                      column(10, p(class = "text-muted", style = "font-size:11px;margin-top:6px;",
+                                   "Weights auto-normalize to 100%. Win threshold is percentage points. Volatility is coefficient of variation for booked revenue.")),
+                      column(2, div(style = "margin-top:8px;",
+                                    downloadButton("download_top_brief", "Download Top Brief",
+                                                   icon = icon("file-excel"),
+                                                   style = "width:100%;font-weight:600;")))
+                    )
+                )
+              ),
+              
+              fluidRow(
+                valueBoxOutput("ceo_total_pred_90d", width = 3),
+                valueBoxOutput("ceo_top_estimator",  width = 3),
+                valueBoxOutput("ceo_at_risk_count",  width = 3),
+                valueBoxOutput("ceo_model_quality",  width = 3)
+              ),
+              
+              fluidRow(
+                box(title = "90-Day Booked Revenue Forecast by Estimator",
+                    status = "primary", solidHeader = TRUE, width = 7,
+                    plotlyOutput("ceo_forecast_plot", height = "380px"),
+                    p(class = "text-muted", style = "font-size:11px;",
+                      "Forecast uses estimator-level monthly history with lag features and seasonality. Error bars show an approximate 80% interval from in-sample model error.")
+                ),
+                box(title = "Executive Action Summary",
+                    status = "info", solidHeader = TRUE, width = 5,
+                    uiOutput("ceo_action_summary"),
+                    p(class = "text-muted", style = "font-size:11px;",
+                      "Composite score combines win quality, efficiency, stability, and expected near-term revenue.")
+                )
+              ),
+              
+              fluidRow(
+                box(title = "Estimator Performance Scorecard",
+                    status = "warning", solidHeader = TRUE, width = 12,
+                    dataTableOutput("ceo_scorecard_table"))
+              )
+      ),
       
       # ── EXECUTIVE DASHBOARD ──────────────────────────────────────────────
       tabItem(tabName = "dashboard",
@@ -195,7 +250,6 @@ dashboardPage(
                                   "Grouped bars show Total Bid $ vs. Total Booked $ per estimator. Win % annotated on each booked bar. Sorted by Total Bid descending.")),
                        
                        tabPanel("Seasonality Heatmap",
-                                # ── NEW: metric toggle ────────────────────────────────
                                 fluidRow(
                                   column(12,
                                          radioGroupButtons(
@@ -208,7 +262,6 @@ dashboardPage(
                                          )
                                   )
                                 ),
-                                # ── END NEW ───────────────────────────────────────────
                                 plotlyOutput("seasonality_heatmap", height = "400px"),
                                 p(class = "text-muted", style = "font-size:11px;",
                                   "Revenue or bid volume by calendar month and year. Darker = higher value. Reveals consistent seasonal peaks and troughs across the full history."))
@@ -301,6 +354,66 @@ dashboardPage(
                     dataTableOutput("its_coef_table"),
                     p(class = "text-muted", style = "font-size:11px; margin-top:6px;",
                       "Full regression output. p < 0.05 indicates a statistically significant effect."))
+              )
+      ),
+      
+      # ── ESTIMATOR SCATTER ────────────────────────────────────────────────
+      tabItem(tabName = "scatter",
+              
+              fluidRow(
+                box(
+                  title       = "Estimator Scatter \u2014 Bid Behavior vs. Conversion",
+                  width       = 12,
+                  status      = "primary",
+                  solidHeader = TRUE,
+                  
+                  # ── Axis / bubble controls ────────────────────────────────
+                  fluidRow(
+                    column(4,
+                           selectInput(
+                             inputId  = "scatter_x",
+                             label    = "X Axis",
+                             choices  = c(
+                               "Avg Bid Size ($)"     = "avg_bid_size",
+                               "Total Bid Volume ($)" = "total_amt_bid",
+                               "Bid Count"            = "total_qty_bid"
+                             ),
+                             selected = "avg_bid_size"
+                           )
+                    ),
+                    column(4,
+                           selectInput(
+                             inputId  = "scatter_y",
+                             label    = "Y Axis",
+                             choices  = c(
+                               "Win Rate (%)"            = "win_rate",
+                               "Avg Booked Size ($)"     = "avg_booked_size",
+                               "Total Booked Volume ($)" = "total_amt_booked"
+                             ),
+                             selected = "win_rate"
+                           )
+                    ),
+                    column(4,
+                           selectInput(
+                             inputId  = "scatter_size",
+                             label    = "Bubble Size",
+                             choices  = c(
+                               "Total Bid Volume ($)" = "total_amt_bid",
+                               "Bid Count"            = "total_qty_bid",
+                               "Total Booked ($)"     = "total_amt_booked"
+                             ),
+                             selected = "total_amt_bid"
+                           )
+                    )
+                  ),
+                  
+                  # ── Plot ─────────────────────────────────────────────────
+                  plotlyOutput("scatter_plot", height = "520px"),
+                  
+                  # ── Footnote ─────────────────────────────────────────────
+                  p(class = "text-muted", style = "font-size:11px; margin-top:6px;",
+                    "Bubble area proportional to selected size metric. Win rate is same-month unless Lag > 0 is set in the sidebar, in which case the lag-adjusted rate is used. Estimators with fewer than 3 bids in the selected period are excluded. Hover for detail.")
+                )
               )
       ),
       

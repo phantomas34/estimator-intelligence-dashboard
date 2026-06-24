@@ -15,6 +15,9 @@ library(strucchange)    # ITS breakpoint detection
 library(lmtest)         # ITS coefficient testing
 library(pool)           # Connection pooling
 
+# --- LOAD MODULES ---
+source("mod_cohort_analysis.R") # <--- THIS IS THE MISSING LINE!
+
 # 1. ESTABLISH DATABASE CONNECTION POOL
 db_pool <- dbPool(
   drv = RPostgres::Postgres(),
