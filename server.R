@@ -1769,4 +1769,304 @@ function(input, output, session) {
     ggplotly(p, tooltip = "text")
   })
   
+  # ── DATA FETCH ────────────────────────────────────────────────────────────────
+  
+  get_revenue_data <- reactive({
+    input$refresh
+    
+    if (!dbExistsTable(db_pool, "pm___project_file")) return(data.frame())
+    
+    dbGetQuery(db_pool, "
+    SELECT
+      pm.pmprojectid,
+      pm.projectid,
+      pm.projectname,
+      pm.projectmanager,
+      pm.projectdatecreated,
+      pm.finalcompletiondate,
+      pm.substantialcompletiondate,
+      pm.billingcompletepercent,
+      pm.billingstatus,
+      pf.contractor,
+      pf.contractamt,
+      pf.contractdate,
+      -- Normalise Scott W. Hutchings to match estimators table
+      CASE
+        WHEN TRIM(pm.projectmanager) = 'Scott W. Hutchings' THEN 'Scott Hutchings'
+        ELSE TRIM(pm.projectmanager)
+      END AS manager_clean
+    FROM pm___project_file pm
+    JOIN project_file pf
+      ON pm.projectid::text = pf.projectid::text
+    WHERE pm.projectmanager IS NOT NULL
+      AND pm.projectmanager != ''
+      AND pm.projectmanager != 'Unassigned Project'
+      AND pf.contractamt > 0
+    ORDER BY pm.projectdatecreated DESC
+  ")
+  })
+  
+  
+  # ── POPULATE FILTERS ──────────────────────────────────────────────────────────
+  
+  observe({
+    df <- get_revenue_data()
+    if (nrow(df) == 0) return()
+    
+    managers    <- sort(unique(df$manager_clean))
+    contractors <- sort(unique(df$contractor[!is.na(df$contractor) & df$contractor != ""]))
+    
+    updatePickerInput(session, "ri_manager",    choices = managers)
+    updatePickerInput(session, "ri_contractor", choices = contractors)
+    
+    min_dt <- as.Date(min(df$projectdatecreated, na.rm = TRUE))
+    max_dt <- as.Date(max(df$projectdatecreated, na.rm = TRUE))
+    updateDateRangeInput(session, "ri_date_range", start = min_dt, end = max_dt)
+  })
+  
+  
+  # ── FILTERED DATA ─────────────────────────────────────────────────────────────
+  
+  ri_filtered <- reactive({
+    df <- get_revenue_data()
+    if (nrow(df) == 0) return(df)
+    
+    req(input$ri_date_range)
+    df <- df %>%
+      filter(as.Date(projectdatecreated) >= input$ri_date_range[1],
+             as.Date(projectdatecreated) <= input$ri_date_range[2])
+    
+    if (!is.null(input$ri_manager) && length(input$ri_manager) > 0)
+      df <- df %>% filter(manager_clean %in% input$ri_manager)
+    
+    if (!is.null(input$ri_contractor) && length(input$ri_contractor) > 0)
+      df <- df %>% filter(contractor %in% input$ri_contractor)
+    
+    df
+  })
+  
+  
+  # ── KPIs ─────────────────────────────────────────────────────────────────────
+  
+  output$ri_kpi_total_value <- renderValueBox({
+    df  <- ri_filtered()
+    val <- sum(df$contractamt, na.rm = TRUE)
+    valueBox(
+      paste0("$", format(round(val / 1e6, 2), big.mark = ","), "M"),
+      "Total Contract Value",
+      icon  = icon("dollar-sign"),
+      color = "green"
+    )
+  })
+  
+  output$ri_kpi_total_projects <- renderValueBox({
+    df <- ri_filtered()
+    valueBox(
+      comma(nrow(df)),
+      "Executed Projects",
+      icon  = icon("building"),
+      color = "blue"
+    )
+  })
+  
+  output$ri_kpi_completed <- renderValueBox({
+    df <- ri_filtered()
+    n  <- sum(!is.na(df$finalcompletiondate))
+    valueBox(
+      comma(n),
+      "Completed Projects",
+      icon  = icon("check-circle"),
+      color = "yellow"
+    )
+  })
+  
+  output$ri_kpi_avg_contract <- renderValueBox({
+    df  <- ri_filtered()
+    avg <- mean(df$contractamt, na.rm = TRUE)
+    valueBox(
+      paste0("$", format(round(avg / 1e3, 1), big.mark = ","), "K"),
+      "Avg Contract Value",
+      icon  = icon("chart-line"),
+      color = "purple"
+    )
+  })
+  
+  
+  # ── EXECUTED REVENUE CHART ────────────────────────────────────────────────────
+  
+  output$ri_revenue_chart <- renderPlotly({
+    df <- ri_filtered()
+    validate(need(nrow(df) > 0, "No project data for selected filters."))
+    
+    agg <- df %>%
+      group_by(manager_clean) %>%
+      summarise(
+        total_value = sum(contractamt, na.rm = TRUE),
+        n_projects  = n(),
+        .groups     = "drop"
+      ) %>%
+      arrange(desc(total_value)) %>%
+      mutate(manager_clean = fct_reorder(manager_clean, total_value))
+    
+    p <- ggplot(agg, aes(
+      x    = manager_clean,
+      y    = total_value,
+      text = paste0(
+        "<b>", manager_clean, "</b><br>",
+        "Contract Value: $", format(round(total_value), big.mark = ","), "<br>",
+        "Projects: ", n_projects
+      )
+    )) +
+      geom_col(fill = "#1a5276", width = 0.65) +
+      coord_flip() +
+      scale_y_continuous(
+        labels = function(x) paste0("$", format(x / 1e6, big.mark = ","), "M")
+      ) +
+      labs(x = "", y = "Total Contract Value") +
+      theme_minimal() +
+      theme(panel.grid.major.y = element_blank(),
+            axis.text.y = element_text(size = 10))
+    
+    ggplotly(p, tooltip = "text")
+  })
+  
+  
+  # ── PROJECT COMPLETION PIPELINE ───────────────────────────────────────────────
+  
+  output$ri_pipeline_chart <- renderPlotly({
+    df <- ri_filtered()
+    validate(need(nrow(df) > 0, "No project data for selected filters."))
+    
+    metric <- input$ri_pipeline_metric
+    
+    agg <- df %>%
+      mutate(status = ifelse(!is.na(finalcompletiondate), "Completed", "In Progress")) %>%
+      group_by(manager_clean, status) %>%
+      summarise(
+        count = n(),
+        value = sum(contractamt, na.rm = TRUE),
+        .groups = "drop"
+      )
+    
+    y_col   <- if (metric == "count") "count" else "value"
+    y_label <- if (metric == "count") "Projects" else "Contract Value ($)"
+    
+    p <- ggplot(agg, aes(
+      x    = manager_clean,
+      y    = .data[[y_col]],
+      fill = status,
+      text = paste0(
+        "<b>", manager_clean, "</b><br>",
+        status, "<br>",
+        if (metric == "count")
+          paste0("Projects: ", count)
+        else
+          paste0("Value: $", format(round(value), big.mark = ","))
+      )
+    )) +
+      geom_col(position = "stack", width = 0.65) +
+      coord_flip() +
+      scale_fill_manual(
+        values = c("Completed" = "#1e8449", "In Progress" = "#85c1e9"),
+        name   = ""
+      ) +
+      scale_y_continuous(
+        labels = if (metric == "value")
+          function(x) paste0("$", format(x / 1e6, big.mark = ","), "M")
+        else
+          comma_format()
+      ) +
+      labs(x = "", y = y_label) +
+      theme_minimal() +
+      theme(panel.grid.major.y = element_blank(),
+            legend.position    = "bottom",
+            axis.text.y        = element_text(size = 10))
+    
+    ggplotly(p, tooltip = "text")
+  })
+  
+  
+  # ── GC REVENUE CONCENTRATION ──────────────────────────────────────────────────
+  
+  output$ri_gc_chart <- renderPlotly({
+    df <- ri_filtered()
+    validate(need(nrow(df) > 0, "No project data for selected filters."))
+    
+    top_n <- input$ri_top_gc
+    
+    agg <- df %>%
+      filter(!is.na(contractor), contractor != "") %>%
+      group_by(contractor) %>%
+      summarise(
+        total_value = sum(contractamt, na.rm = TRUE),
+        n_projects  = n(),
+        n_managers  = n_distinct(manager_clean),
+        .groups     = "drop"
+      ) %>%
+      arrange(desc(total_value)) %>%
+      slice_head(n = top_n) %>%
+      mutate(contractor = fct_reorder(contractor, total_value))
+    
+    p <- ggplot(agg, aes(
+      x    = contractor,
+      y    = total_value,
+      text = paste0(
+        "<b>", contractor, "</b><br>",
+        "Contract Value: $", format(round(total_value), big.mark = ","), "<br>",
+        "Projects: ", n_projects, "<br>",
+        "Managers: ", n_managers
+      )
+    )) +
+      geom_col(fill = "#2e86c1", width = 0.65) +
+      coord_flip() +
+      scale_y_continuous(
+        labels = function(x) paste0("$", format(x / 1e6, big.mark = ","), "M")
+      ) +
+      labs(x = "", y = "Total Contract Value") +
+      theme_minimal() +
+      theme(panel.grid.major.y = element_blank(),
+            axis.text.y        = element_text(size = 9))
+    
+    ggplotly(p, tooltip = "text")
+  })
+  
+  
+  # ── PROJECT DETAIL TABLE ──────────────────────────────────────────────────────
+  
+  output$ri_project_table <- renderDataTable({
+    df <- ri_filtered()
+    validate(need(nrow(df) > 0, "No project data for selected filters."))
+    
+    df %>%
+      arrange(desc(contractamt)) %>%
+      mutate(
+        Manager    = manager_clean,
+        Project    = projectname,
+        GC         = contractor,
+        Contract   = paste0("$", format(round(contractamt), big.mark = ",")),
+        Created    = format(as.Date(projectdatecreated), "%b %Y"),
+        Completed  = ifelse(
+          !is.na(finalcompletiondate),
+          format(as.Date(finalcompletiondate), "%b %Y"),
+          "In Progress"
+        )
+      ) %>%
+      select(Manager, Project, GC, Contract, Created, Completed) %>%
+      datatable(
+        options = list(
+          pageLength = 10,
+          scrollX    = TRUE,
+          dom        = "ftp",
+          order      = list(list(3, "desc"))
+        ),
+        rownames = FALSE
+      ) %>%
+      formatStyle(
+        "Completed",
+        color = styleEqual(
+          c("In Progress"),
+          c("#2e86c1")
+        )
+      )
+  })
 }

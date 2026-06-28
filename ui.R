@@ -15,6 +15,7 @@ dashboardPage(
       menuItem("Intervention Analysis", tabName = "its",       icon = icon("flask")),
       menuItem("Data Management",       tabName = "admin",     icon = icon("database")),
       menuItem("Client Intelligence", tabName = "client_intel", icon = icon("handshake")),
+      menuItem("Revenue Intelligence", tabName = "revenue_intel", icon = icon("dollar-sign")),
       hr(),
       div(style = "padding:10px;",
           h5("Filter Controls",
@@ -561,8 +562,132 @@ dashboardPage(
                 )
               )
       )
-      
-      
+      ,
+      tabItem(tabName = "revenue_intel",
+              
+              # ── HEADER ─────────────────────────────────────────────────────────────────
+              fluidRow(
+                box(
+                  width = 12, status = "info", solidHeader = FALSE,
+                  div(style = "padding:4px 0;",
+                      p(style = "margin:0; font-size:13px; color:#2c3e50;",
+                        icon("flask"), " ",
+                        tags$b("Phase 2 — Revenue Intelligence. "),
+                        "Powered by executed project data from the IMS PM system. Shows contract
+           value, project completion, and GC revenue concentration by project manager.
+           Source: ", tags$code("pm___project_file"), " joined to ",
+                        tags$code("project_file"), "."
+                      )
+                  )
+                )
+              ),
+              
+              # ── KPI ROW ────────────────────────────────────────────────────────────────
+              fluidRow(
+                valueBoxOutput("ri_kpi_total_value",    width = 3),
+                valueBoxOutput("ri_kpi_total_projects", width = 3),
+                valueBoxOutput("ri_kpi_completed",      width = 3),
+                valueBoxOutput("ri_kpi_avg_contract",   width = 3)
+              ),
+              
+              # ── FILTERS ────────────────────────────────────────────────────────────────
+              fluidRow(
+                box(
+                  width = 12, status = "primary", solidHeader = TRUE, title = "Filters",
+                  fluidRow(
+                    column(4,
+                           pickerInput(
+                             "ri_manager", "Project Manager",
+                             choices  = NULL, multiple = TRUE,
+                             options  = list(
+                               `actions-box`          = TRUE,
+                               `live-search`          = TRUE,
+                               `selected-text-format` = "count > 2",
+                               `none-selected-text`   = "All Managers"
+                             )
+                           )
+                    ),
+                    column(4,
+                           dateRangeInput(
+                             "ri_date_range", "Project Created Date",
+                             start     = as.Date("2010-01-01"),
+                             end       = Sys.Date(),
+                             separator = " to "
+                           )
+                    ),
+                    column(4,
+                           pickerInput(
+                             "ri_contractor", "Contractor (GC)",
+                             choices  = NULL, multiple = TRUE,
+                             options  = list(
+                               `actions-box`          = TRUE,
+                               `live-search`          = TRUE,
+                               `none-selected-text`   = "All Contractors"
+                             )
+                           )
+                    )
+                  )
+                )
+              ),
+              
+              # ── ROW 1: EXECUTED REVENUE + PROJECT PIPELINE ─────────────────────────────
+              fluidRow(
+                box(
+                  title       = "Executed Contract Value by Project Manager",
+                  status      = "primary", solidHeader = TRUE, width = 6,
+                  plotlyOutput("ri_revenue_chart", height = "380px"),
+                  p(class = "text-muted", style = "font-size:11px;",
+                    "Total contract value of executed projects per manager.
+         Source: pm___project_file joined to project_file on projectid.")
+                ),
+                box(
+                  title       = "Project Completion Pipeline",
+                  status      = "primary", solidHeader = TRUE, width = 6,
+                  fluidRow(
+                    column(6,
+                           radioGroupButtons(
+                             "ri_pipeline_metric", NULL,
+                             choices  = c("Count" = "count", "Contract Value" = "value"),
+                             selected = "count",
+                             status = "default", size = "xs", justified = TRUE
+                           )
+                    )
+                  ),
+                  plotlyOutput("ri_pipeline_chart", height = "380px"),
+                  p(class = "text-muted", style = "font-size:11px;",
+                    "Completed vs in-progress projects per manager.
+         Toggle to see by count or by contract value.")
+                )
+              ),
+              
+              # ── ROW 2: GC REVENUE CONCENTRATION + PROJECT DETAIL TABLE ─────────────────
+              fluidRow(
+                box(
+                  title       = "GC Revenue Concentration",
+                  status      = "primary", solidHeader = TRUE, width = 5,
+                  fluidRow(
+                    column(6,
+                           sliderInput(
+                             "ri_top_gc", "Show Top N GCs",
+                             min = 5, max = 20, value = 10, step = 5, ticks = FALSE
+                           )
+                    )
+                  ),
+                  plotlyOutput("ri_gc_chart", height = "400px"),
+                  p(class = "text-muted", style = "font-size:11px;",
+                    "Which GCs generate the most executed contract value.
+         Reveals revenue concentration risk per contractor relationship.")
+                ),
+                box(
+                  title       = "Executed Project Detail",
+                  status      = "primary", solidHeader = TRUE, width = 7,
+                  dataTableOutput("ri_project_table"),
+                  p(class = "text-muted", style = "font-size:11px; margin-top:6px;",
+                    "Full project list with contract values, completion dates, and GC.
+         Sortable and searchable.")
+                )
+              )
+      )
     )
   )
 )
